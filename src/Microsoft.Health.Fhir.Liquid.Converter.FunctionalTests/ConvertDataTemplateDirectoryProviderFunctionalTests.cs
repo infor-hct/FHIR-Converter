@@ -109,6 +109,16 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.FunctionalTests
             ConvertJsonMessageAndValidateExpectedResponse(templateProvider, rootTemplate, inputFile, expectedFile);
         }
 
+        [Theory]
+        [MemberData(nameof(GetDataForX12))]
+        public void GivenX12Message_WhenConverting_ValidFhirBundleShouldBeReturned(string rootTemplate, string inputFile)
+        {
+            var templateDirectory = Path.Join(AppDomain.CurrentDomain.BaseDirectory, Constants.TemplateDirectory, "X12");
+            var templateProvider = new TemplateProvider(templateDirectory, DataType.X12);
+
+            ConvertX12MessageAndValidateResponse(templateProvider, rootTemplate, inputFile);
+        }
+
         [Fact]
         public void GivenAnInvalidTemplate_WhenConverting_ExceptionsShouldBeThrown()
         {

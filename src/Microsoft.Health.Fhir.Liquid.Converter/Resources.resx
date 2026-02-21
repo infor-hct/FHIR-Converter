@@ -225,4 +225,7 @@
   <data name="ValidateTagSyntaxError" xml:space="preserve">
     <value>Syntax Error in 'validate' tag - Valid syntax: validate [schema file].</value>
   </data>
+  <data name="InvalidX12Message" xml:space="preserve">
+    <value>The X12 EDI message is invalid: {0}.</value>
+  </data>
 </root>

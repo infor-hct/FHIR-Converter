@@ -1,0 +1,647 @@
+{% comment -%}
+    X12 270 - Health Care Eligibility Benefit Inquiry to FHIR R4 CoverageEligibilityRequest Bundle
+
+    Segment mapping:
+      ISA: Interchange Control Header
+      GS:  Functional Group Header
+      ST:  Transaction Set Header (270)
+      BHT: Beginning of Hierarchical Transaction
+      HL:  Hierarchical Level (20=Info Source, 21=Info Receiver, 22=Subscriber, 23=Dependent)
+      NM1: Individual or Organizational Name
+      REF: Reference Identification
+      DTP: Date or Time Period
+      DMG: Demographic Information
+      EQ:  Eligibility or Benefit Inquiry Information
+      SE:  Transaction Set Trailer
+      GE:  Functional Group Trailer
+      IEA: Interchange Control Trailer
+
+    Element indexing:
+      Elements[0] = segment ID (e.g. "ISA", "NM1")
+      Elements[1] = first data element
+      Elements[2] = second data element, etc.
+      SubElements are 1-based (index 0 is null placeholder)
+{% endcomment -%}
+{% assign firstSegments = x12Data | get_first_x12_segments: 'ISA|GS|ST|BHT' -%}
+{% assign hlLoops = x12Data | split_x12_by_hl_loop -%}
+{% assign allNM1 = x12Data | get_x12_segments_by_type: 'NM1' -%}
+{% assign allHL = x12Data | get_x12_segments_by_type: 'HL' -%}
+{% assign allREF = x12Data | get_x12_segments_by_type: 'REF' -%}
+{% assign allDTP = x12Data | get_x12_segments_by_type: 'DTP' -%}
+{% assign allEQ = x12Data | get_x12_segments_by_type: 'EQ' -%}
+{% assign allDMG = x12Data | get_x12_segments_by_type: 'DMG' -%}
+{% comment -%} Walk HL loops to find segments by hierarchical level code (HL03) {% endcomment -%}
+{% assign payerNM1 = null -%}
+{% assign providerNM1 = null -%}
+{% assign providerREF = null -%}
+{% assign subscriberNM1 = null -%}
+{% assign subscriberDMG = null -%}
+{% assign dependentNM1 = null -%}
+{% assign dependentDMG = null -%}
+{% assign serviceDateDTP = null -%}
+{% assign eligibilityEQ = null -%}
+{% assign hasDependent = false -%}
+{% for loop in hlLoops -%}
+    {% assign loopFirst = loop | get_first_x12_segments: 'HL|NM1|REF|DTP|DMG|EQ' -%}
+    {% if loopFirst.HL -%}
+        {% assign hlLevelCode = loopFirst.HL.Elements[3].Value -%}
+        {% if hlLevelCode == "20" -%}
+            {% if loopFirst.NM1 -%}
+                {% assign payerNM1 = loopFirst.NM1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "21" -%}
+            {% if loopFirst.NM1 -%}
+                {% assign providerNM1 = loopFirst.NM1 -%}
+            {% endif -%}
+            {% if loopFirst.REF -%}
+                {% assign providerREF = loopFirst.REF -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "22" -%}
+            {% if loopFirst.NM1 -%}
+                {% assign subscriberNM1 = loopFirst.NM1 -%}
+            {% endif -%}
+            {% if loopFirst.DMG -%}
+                {% assign subscriberDMG = loopFirst.DMG -%}
+            {% endif -%}
+            {% if loopFirst.DTP -%}
+                {% assign serviceDateDTP = loopFirst.DTP -%}
+            {% endif -%}
+            {% if loopFirst.EQ -%}
+                {% assign eligibilityEQ = loopFirst.EQ -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "23" -%}
+            {% assign hasDependent = true -%}
+            {% if loopFirst.NM1 -%}
+                {% assign dependentNM1 = loopFirst.NM1 -%}
+            {% endif -%}
+            {% if loopFirst.DMG -%}
+                {% assign dependentDMG = loopFirst.DMG -%}
+            {% endif -%}
+            {% if loopFirst.DTP -%}
+                {% assign serviceDateDTP = loopFirst.DTP -%}
+            {% endif -%}
+            {% if loopFirst.EQ -%}
+                {% assign eligibilityEQ = loopFirst.EQ -%}
+            {% endif -%}
+        {% endif -%}
+    {% endif -%}
+{% endfor -%}
+{% comment -%} Generate deterministic resource IDs {% endcomment -%}
+{% assign bundleId = firstSegments.BHT.Elements[3].Value | generate_uuid -%}
+{% assign cerId = firstSegments.BHT.Elements[3].Value | append: '-CoverageEligibilityRequest' | generate_uuid -%}
+{% assign patientId = subscriberNM1.Elements[9].Value | append: '-Patient' | generate_uuid -%}
+{% assign coverageId = subscriberNM1.Elements[9].Value | append: '-Coverage' | generate_uuid -%}
+{% if payerNM1 -%}
+    {% assign payerOrgId = payerNM1.Elements[9].Value | append: '-Organization-Payer' | generate_uuid -%}
+{% endif -%}
+{% if providerNM1 -%}
+    {% assign providerIsOrg = false -%}
+    {% if providerNM1.Elements[2].Value == "2" -%}
+        {% assign providerIsOrg = true -%}
+    {% endif -%}
+    {% if providerIsOrg -%}
+        {% assign providerOrgId = providerNM1.Elements[9].Value | append: '-Organization-Provider' | generate_uuid -%}
+    {% else -%}
+        {% assign practitionerId = providerNM1.Elements[9].Value | append: '-Practitioner' | generate_uuid -%}
+    {% endif -%}
+{% endif -%}
+{% if hasDependent and dependentNM1 -%}
+    {% assign dependentPatientId = dependentNM1.Elements[9].Value | default: subscriberNM1.Elements[9].Value | append: '-Patient-Dependent' | generate_uuid -%}
+{% endif -%}
+{
+    "resourceType": "Bundle",
+    "type": "batch",
+    "id": "{{ bundleId }}",
+    {% if firstSegments.BHT.Elements[4] -%}
+        {% assign bhtDate = firstSegments.BHT.Elements[4].Value -%}
+        {% if firstSegments.BHT.Elements[5] -%}
+            {% assign bhtTime = firstSegments.BHT.Elements[5].Value -%}
+            {% assign bhtTimestamp = bhtDate | append: bhtTime -%}
+        {% else -%}
+            {% assign bhtTimestamp = bhtDate -%}
+        {% endif -%}
+        "timestamp": "{{ bhtTimestamp | format_as_date_time }}",
+    {% endif -%}
+    "identifier": {
+        "value": "{{ firstSegments.BHT.Elements[3].Value }}"
+    },
+    "entry": [
+        {% comment -%} ===== CoverageEligibilityRequest Resource ===== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ cerId }}",
+            "resource": {
+                "resourceType": "CoverageEligibilityRequest",
+                "id": "{{ cerId }}",
+                "status": "active",
+                "purpose": [
+                    {% if firstSegments.BHT.Elements[2].Value == "13" -%}
+                        "validation"
+                    {% else -%}
+                        "benefits"
+                    {% endif -%}
+                ],
+                {% comment -%} Patient reference: dependent if present, else subscriber {% endcomment -%}
+                "patient": {
+                    {% if hasDependent and dependentNM1 -%}
+                        "reference": "urn:uuid:{{ dependentPatientId }}"
+                    {% else -%}
+                        "reference": "urn:uuid:{{ patientId }}"
+                    {% endif -%}
+                },
+                {% if serviceDateDTP -%}
+                    {% if serviceDateDTP.Elements[3] -%}
+                        {% assign dtpQualifier = serviceDateDTP.Elements[2].Value -%}
+                        {% assign dtpFormat = serviceDateDTP.Elements[2].Value -%}
+                        {% assign dtpValue = serviceDateDTP.Elements[3].Value -%}
+                        {% if serviceDateDTP.Elements[2].Value == "RD8" -%}
+                            {% assign dateParts = dtpValue | split: '-' -%}
+                            "servicedPeriod": {
+                                {% if dateParts[0] and dateParts[0] != "" -%}
+                                    "start": "{{ dateParts[0] | format_as_date_time }}",
+                                {% endif -%}
+                                {% if dateParts[1] and dateParts[1] != "" -%}
+                                    "end": "{{ dateParts[1] | format_as_date_time }}"
+                                {% endif -%}
+                            },
+                        {% else -%}
+                            "servicedDate": "{{ dtpValue | format_as_date_time }}",
+                        {% endif -%}
+                    {% endif -%}
+                {% endif -%}
+                {% if firstSegments.BHT.Elements[4] -%}
+                    "created": "{{ firstSegments.BHT.Elements[4].Value | format_as_date_time }}",
+                {% endif -%}
+                {% if providerNM1 -%}
+                    "provider": {
+                        {% if providerIsOrg -%}
+                            "reference": "urn:uuid:{{ providerOrgId }}"
+                        {% else -%}
+                            "reference": "urn:uuid:{{ practitionerId }}"
+                        {% endif -%}
+                    },
+                {% endif -%}
+                {% if payerNM1 -%}
+                    "insurer": {
+                        "reference": "urn:uuid:{{ payerOrgId }}"
+                    },
+                {% endif -%}
+                "insurance": [
+                    {
+                        "focal": true,
+                        "coverage": {
+                            "reference": "urn:uuid:{{ coverageId }}"
+                        }
+                    }
+                ],
+                {% if eligibilityEQ -%}
+                    "item": [
+                        {
+                            {% if eligibilityEQ.Elements[1] -%}
+                                "category": {
+                                    "coding": [
+                                        {
+                                            "system": "https://x12.org/codes/service-type-codes",
+                                            "code": "{{ eligibilityEQ.Elements[1].Value }}"
+                                        }
+                                    ]
+                                }
+                            {% endif -%}
+                        }
+                    ],
+                {% endif -%}
+                "identifier": [
+                    {
+                        "system": "https://x12.org/transaction-reference",
+                        "value": "{{ firstSegments.BHT.Elements[3].Value }}"
+                    }
+                ]
+            },
+            "request": {
+                "method": "PUT",
+                "url": "CoverageEligibilityRequest/{{ cerId }}"
+            }
+        },
+        {% comment -%} ===== Patient Resource (Subscriber) ===== {% endcomment -%}
+        {% if subscriberNM1 -%}
+            {
+                "fullUrl": "urn:uuid:{{ patientId }}",
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "{{ patientId }}",
+                    {% if subscriberNM1.Elements[4] or subscriberNM1.Elements[3] -%}
+                        "name": [
+                            {
+                                {% if subscriberNM1.Elements[3] -%}
+                                    "family": "{{ subscriberNM1.Elements[3].Value }}",
+                                {% endif -%}
+                                {% if subscriberNM1.Elements[4] -%}
+                                    "given": [
+                                        "{{ subscriberNM1.Elements[4].Value }}"
+                                        {% if subscriberNM1.Elements[5] and subscriberNM1.Elements[5].Value != "" -%}
+                                            , "{{ subscriberNM1.Elements[5].Value }}"
+                                        {% endif -%}
+                                    ],
+                                {% endif -%}
+                                {% if subscriberNM1.Elements[6] and subscriberNM1.Elements[6].Value != "" -%}
+                                    "prefix": [
+                                        "{{ subscriberNM1.Elements[6].Value }}"
+                                    ],
+                                {% endif -%}
+                                {% if subscriberNM1.Elements[7] and subscriberNM1.Elements[7].Value != "" -%}
+                                    "suffix": [
+                                        "{{ subscriberNM1.Elements[7].Value }}"
+                                    ],
+                                {% endif -%}
+                                "use": "official"
+                            }
+                        ],
+                    {% endif -%}
+                    {% if subscriberNM1.Elements[9] -%}
+                        "identifier": [
+                            {
+                                {% if subscriberNM1.Elements[8].Value == "MI" -%}
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                "code": "MB",
+                                                "display": "Member Number"
+                                            }
+                                        ]
+                                    },
+                                {% endif -%}
+                                "system": "https://x12.org/member-identifier",
+                                "value": "{{ subscriberNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    {% if subscriberDMG -%}
+                        {% if subscriberDMG.Elements[2] and subscriberDMG.Elements[2].Value != "" -%}
+                            "birthDate": "{{ subscriberDMG.Elements[2].Value | format_as_date_time }}",
+                        {% endif -%}
+                        {% if subscriberDMG.Elements[3] and subscriberDMG.Elements[3].Value != "" -%}
+                            "gender": "{% if subscriberDMG.Elements[3].Value == 'M' %}male{% elsif subscriberDMG.Elements[3].Value == 'F' %}female{% else %}unknown{% endif %}",
+                        {% endif -%}
+                    {% endif -%}
+                    "active": true
+                },
+                "request": {
+                    "method": "PUT",
+                    "url": "Patient/{{ patientId }}"
+                }
+            },
+        {% endif -%}
+        {% comment -%} ===== Patient Resource (Dependent) ===== {% endcomment -%}
+        {% if hasDependent and dependentNM1 -%}
+            {
+                "fullUrl": "urn:uuid:{{ dependentPatientId }}",
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "{{ dependentPatientId }}",
+                    {% if dependentNM1.Elements[4] or dependentNM1.Elements[3] -%}
+                        "name": [
+                            {
+                                {% if dependentNM1.Elements[3] -%}
+                                    "family": "{{ dependentNM1.Elements[3].Value }}",
+                                {% endif -%}
+                                {% if dependentNM1.Elements[4] -%}
+                                    "given": [
+                                        "{{ dependentNM1.Elements[4].Value }}"
+                                        {% if dependentNM1.Elements[5] and dependentNM1.Elements[5].Value != "" -%}
+                                            , "{{ dependentNM1.Elements[5].Value }}"
+                                        {% endif -%}
+                                    ],
+                                {% endif -%}
+                                {% if dependentNM1.Elements[6] and dependentNM1.Elements[6].Value != "" -%}
+                                    "prefix": [
+                                        "{{ dependentNM1.Elements[6].Value }}"
+                                    ],
+                                {% endif -%}
+                                {% if dependentNM1.Elements[7] and dependentNM1.Elements[7].Value != "" -%}
+                                    "suffix": [
+                                        "{{ dependentNM1.Elements[7].Value }}"
+                                    ],
+                                {% endif -%}
+                                "use": "official"
+                            }
+                        ],
+                    {% endif -%}
+                    {% if dependentNM1.Elements[9] and dependentNM1.Elements[9].Value != "" -%}
+                        "identifier": [
+                            {
+                                {% if dependentNM1.Elements[8].Value == "MI" -%}
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                "code": "MB",
+                                                "display": "Member Number"
+                                            }
+                                        ]
+                                    },
+                                {% endif -%}
+                                "system": "https://x12.org/member-identifier",
+                                "value": "{{ dependentNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    {% if dependentDMG -%}
+                        {% if dependentDMG.Elements[2] and dependentDMG.Elements[2].Value != "" -%}
+                            "birthDate": "{{ dependentDMG.Elements[2].Value | format_as_date_time }}",
+                        {% endif -%}
+                        {% if dependentDMG.Elements[3] and dependentDMG.Elements[3].Value != "" -%}
+                            "gender": "{% if dependentDMG.Elements[3].Value == 'M' %}male{% elsif dependentDMG.Elements[3].Value == 'F' %}female{% else %}unknown{% endif %}",
+                        {% endif -%}
+                    {% endif -%}
+                    "link": [
+                        {
+                            "other": {
+                                "reference": "urn:uuid:{{ patientId }}"
+                            },
+                            "type": "seealso"
+                        }
+                    ],
+                    "active": true
+                },
+                "request": {
+                    "method": "PUT",
+                    "url": "Patient/{{ dependentPatientId }}"
+                }
+            },
+        {% endif -%}
+        {% comment -%} ===== Organization Resource (Payer / Information Source) ===== {% endcomment -%}
+        {% if payerNM1 -%}
+            {
+                "fullUrl": "urn:uuid:{{ payerOrgId }}",
+                "resource": {
+                    "resourceType": "Organization",
+                    "id": "{{ payerOrgId }}",
+                    {% if payerNM1.Elements[3] and payerNM1.Elements[3].Value != "" -%}
+                        "name": "{{ payerNM1.Elements[3].Value }}",
+                    {% endif -%}
+                    {% if payerNM1.Elements[9] and payerNM1.Elements[9].Value != "" -%}
+                        "identifier": [
+                            {
+                                {% if payerNM1.Elements[8].Value == "PI" -%}
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                "code": "NPI",
+                                                "display": "National provider identifier"
+                                            }
+                                        ]
+                                    },
+                                    "system": "http://hl7.org/fhir/sid/us-npi",
+                                {% elsif payerNM1.Elements[8].Value == "XV" -%}
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                "code": "NIIP",
+                                                "display": "National Insurance Intermediary Identifier"
+                                            }
+                                        ]
+                                    },
+                                    "system": "https://x12.org/payer-identifier",
+                                {% else -%}
+                                    "system": "https://x12.org/payer-identifier",
+                                {% endif -%}
+                                "value": "{{ payerNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    "type": [
+                        {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                                    "code": "ins",
+                                    "display": "Insurance Company"
+                                }
+                            ]
+                        }
+                    ],
+                    "active": true
+                },
+                "request": {
+                    "method": "PUT",
+                    "url": "Organization/{{ payerOrgId }}"
+                }
+            },
+        {% endif -%}
+        {% comment -%} ===== Organization or Practitioner Resource (Provider / Information Receiver) ===== {% endcomment -%}
+        {% if providerNM1 -%}
+            {% if providerIsOrg -%}
+                {
+                    "fullUrl": "urn:uuid:{{ providerOrgId }}",
+                    "resource": {
+                        "resourceType": "Organization",
+                        "id": "{{ providerOrgId }}",
+                        {% if providerNM1.Elements[3] and providerNM1.Elements[3].Value != "" -%}
+                            "name": "{{ providerNM1.Elements[3].Value }}",
+                        {% endif -%}
+                        {% if providerNM1.Elements[9] and providerNM1.Elements[9].Value != "" -%}
+                            "identifier": [
+                                {
+                                    {% if providerNM1.Elements[8].Value == "XX" -%}
+                                        "type": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                    "code": "NPI",
+                                                    "display": "National provider identifier"
+                                                }
+                                            ]
+                                        },
+                                        "system": "http://hl7.org/fhir/sid/us-npi",
+                                    {% else -%}
+                                        "system": "https://x12.org/provider-identifier",
+                                    {% endif -%}
+                                    "value": "{{ providerNM1.Elements[9].Value }}"
+                                }
+                            ],
+                        {% endif -%}
+                        {% if providerREF -%}
+                            {% if providerREF.Elements[1].Value == "EI" and providerREF.Elements[2] and providerREF.Elements[2].Value != "" -%}
+                                "identifier": [
+                                    {
+                                        "type": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                    "code": "TAX",
+                                                    "display": "Tax ID number"
+                                                }
+                                            ]
+                                        },
+                                        "system": "urn:oid:2.16.840.1.113883.4.4",
+                                        "value": "{{ providerREF.Elements[2].Value }}"
+                                    }
+                                ],
+                            {% endif -%}
+                        {% endif -%}
+                        "type": [
+                            {
+                                "coding": [
+                                    {
+                                        "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                                        "code": "prov",
+                                        "display": "Healthcare Provider"
+                                    }
+                                ]
+                            }
+                        ],
+                        "active": true
+                    },
+                    "request": {
+                        "method": "PUT",
+                        "url": "Organization/{{ providerOrgId }}"
+                    }
+                },
+            {% else -%}
+                {
+                    "fullUrl": "urn:uuid:{{ practitionerId }}",
+                    "resource": {
+                        "resourceType": "Practitioner",
+                        "id": "{{ practitionerId }}",
+                        {% if providerNM1.Elements[3] or providerNM1.Elements[4] -%}
+                            "name": [
+                                {
+                                    {% if providerNM1.Elements[3] and providerNM1.Elements[3].Value != "" -%}
+                                        "family": "{{ providerNM1.Elements[3].Value }}",
+                                    {% endif -%}
+                                    {% if providerNM1.Elements[4] and providerNM1.Elements[4].Value != "" -%}
+                                        "given": [
+                                            "{{ providerNM1.Elements[4].Value }}"
+                                            {% if providerNM1.Elements[5] and providerNM1.Elements[5].Value != "" -%}
+                                                , "{{ providerNM1.Elements[5].Value }}"
+                                            {% endif -%}
+                                        ],
+                                    {% endif -%}
+                                    {% if providerNM1.Elements[6] and providerNM1.Elements[6].Value != "" -%}
+                                        "prefix": [
+                                            "{{ providerNM1.Elements[6].Value }}"
+                                        ],
+                                    {% endif -%}
+                                    {% if providerNM1.Elements[7] and providerNM1.Elements[7].Value != "" -%}
+                                        "suffix": [
+                                            "{{ providerNM1.Elements[7].Value }}"
+                                        ],
+                                    {% endif -%}
+                                    "use": "official"
+                                }
+                            ],
+                        {% endif -%}
+                        "identifier": [
+                            {% if providerNM1.Elements[9] and providerNM1.Elements[9].Value != "" -%}
+                                {
+                                    {% if providerNM1.Elements[8].Value == "XX" -%}
+                                        "type": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                    "code": "NPI",
+                                                    "display": "National provider identifier"
+                                                }
+                                            ]
+                                        },
+                                        "system": "http://hl7.org/fhir/sid/us-npi",
+                                    {% else -%}
+                                        "system": "https://x12.org/provider-identifier",
+                                    {% endif -%}
+                                    "value": "{{ providerNM1.Elements[9].Value }}"
+                                }
+                            {% endif -%}
+                            {% if providerREF -%}
+                                {% if providerREF.Elements[1].Value == "EI" and providerREF.Elements[2] and providerREF.Elements[2].Value != "" -%}
+                                    ,{
+                                        "type": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                    "code": "TAX",
+                                                    "display": "Tax ID number"
+                                                }
+                                            ]
+                                        },
+                                        "system": "urn:oid:2.16.840.1.113883.4.4",
+                                        "value": "{{ providerREF.Elements[2].Value }}"
+                                    }
+                                {% endif -%}
+                            {% endif -%}
+                        ],
+                        "active": true
+                    },
+                    "request": {
+                        "method": "PUT",
+                        "url": "Practitioner/{{ practitionerId }}"
+                    }
+                },
+            {% endif -%}
+        {% endif -%}
+        {% comment -%} ===== Coverage Resource ===== {% endcomment -%}
+        {% if subscriberNM1 -%}
+            {
+                "fullUrl": "urn:uuid:{{ coverageId }}",
+                "resource": {
+                    "resourceType": "Coverage",
+                    "id": "{{ coverageId }}",
+                    "status": "active",
+                    "subscriber": {
+                        "reference": "urn:uuid:{{ patientId }}"
+                    },
+                    {% if subscriberNM1.Elements[9] -%}
+                        "subscriberId": "{{ subscriberNM1.Elements[9].Value }}",
+                    {% endif -%}
+                    "beneficiary": {
+                        {% if hasDependent and dependentNM1 -%}
+                            "reference": "urn:uuid:{{ dependentPatientId }}"
+                        {% else -%}
+                            "reference": "urn:uuid:{{ patientId }}"
+                        {% endif -%}
+                    },
+                    {% if hasDependent -%}
+                        "relationship": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                                    "code": "other"
+                                }
+                            ]
+                        },
+                    {% else -%}
+                        "relationship": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                                    "code": "self"
+                                }
+                            ]
+                        },
+                    {% endif -%}
+                    {% if payerNM1 -%}
+                        "payor": [
+                            {
+                                "reference": "urn:uuid:{{ payerOrgId }}"
+                            }
+                        ],
+                    {% endif -%}
+                    "identifier": [
+                        {
+                            "system": "https://x12.org/member-identifier",
+                            "value": "{{ subscriberNM1.Elements[9].Value }}"
+                        }
+                    ]
+                },
+                "request": {
+                    "method": "PUT",
+                    "url": "Coverage/{{ coverageId }}"
+                }
+            }
+        {% endif -%}
+    ]
+}

@@ -1,0 +1,214 @@
+{% comment %}
+  FHIR Task (Claim Status Inquiry) Bundle to X12 276 (Health Care Claim Status Request)
+
+  Expected input (msg): A FHIR Bundle containing:
+    - Task (representing the claim status inquiry, with reasonCode and focus on Claim)
+    - Patient (the subscriber/member)
+    - Organization (payer)
+    - Organization or Practitioner (provider / requester)
+    - Claim (the original claim being inquired about)
+    - Coverage (insurance coverage)
+{% endcomment %}
+
+{% comment %} Extract resources from the Bundle {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "Task" %}
+    {% assign task = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Patient" %}
+    {% assign patient = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Claim" %}
+    {% assign claim = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Coverage" %}
+    {% assign coverage = entry.resource %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Find provider and payer organizations {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "Organization" %}
+    {% comment %} Try to identify payer vs provider by reference {% endcomment %}
+    {% if claim.insurer.reference contains entry.resource.id %}
+      {% assign payer = entry.resource %}
+    {% elsif task.owner.reference contains entry.resource.id %}
+      {% assign payer = entry.resource %}
+    {% elsif task.requester.reference contains entry.resource.id %}
+      {% assign provider = entry.resource %}
+    {% elsif claim.provider.reference contains entry.resource.id %}
+      {% assign provider = entry.resource %}
+    {% endif %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Practitioner" %}
+    {% if task.requester.reference contains entry.resource.id %}
+      {% assign practitioner = entry.resource %}
+    {% elsif claim.provider.reference contains entry.resource.id %}
+      {% assign practitioner = entry.resource %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Fallback: assign first and second Organization as provider and payer {% endcomment %}
+{% if provider == nil and payer == nil %}
+  {% assign org_count = 0 %}
+  {% for entry in msg.entry %}
+    {% if entry.resource.resourceType == "Organization" %}
+      {% if org_count == 0 %}
+        {% assign provider = entry.resource %}
+      {% elsif org_count == 1 %}
+        {% assign payer = entry.resource %}
+      {% endif %}
+      {% assign org_count = org_count | plus: 1 %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% comment %} Date/Time {% endcomment %}
+{% assign now_date = "now" | now: "yyMMdd" %}
+{% assign now_time = "now" | now: "HHmm" %}
+{% assign full_date = "now" | now: "yyyyMMdd" %}
+
+{% comment %} Identifiers {% endcomment %}
+{% if provider %}
+  {% assign provider_id = provider.identifier[0].value | default: "SENDER" %}
+{% elsif practitioner %}
+  {% assign provider_id = practitioner.identifier[0].value | default: "SENDER" %}
+{% else %}
+  {% assign provider_id = "SENDER" %}
+{% endif %}
+
+{% if payer %}
+  {% assign payer_id = payer.identifier[0].value | default: "RECEIVER" %}
+{% else %}
+  {% assign payer_id = "RECEIVER" %}
+{% endif %}
+
+{% comment %} Patient details {% endcomment %}
+{% assign patient_last = patient.name[0].family | default: "" %}
+{% assign patient_first = patient.name[0].given[0] | default: "" %}
+{% assign patient_middle = patient.name[0].given[1] | default: "" %}
+{% assign patient_dob = patient.birthDate | replace: "-", "" %}
+
+{% if patient.gender == "male" %}
+  {% assign patient_gender = "M" %}
+{% elsif patient.gender == "female" %}
+  {% assign patient_gender = "F" %}
+{% else %}
+  {% assign patient_gender = "U" %}
+{% endif %}
+
+{% comment %} Subscriber ID {% endcomment %}
+{% assign subscriber_id = coverage.subscriberId | default: "" %}
+{% if subscriber_id == "" %}
+  {% assign subscriber_id = patient.identifier[0].value | default: "" %}
+{% endif %}
+
+{% comment %} Control number {% endcomment %}
+{% assign control_number = task.id | default: "000000001" | truncate: 9, "" %}
+
+{% comment %} Claim details {% endcomment %}
+{% assign claim_id = claim.identifier[0].value | default: "" %}
+{% assign claim_amount = claim.total.value | default: "" %}
+{% assign claim_currency = claim.total.currency | default: "USD" %}
+
+{% comment %} Service dates from claim {% endcomment %}
+{% if claim.billablePeriod %}
+  {% assign service_start = claim.billablePeriod.start | replace: "-", "" | truncate: 8, "" %}
+  {% assign service_end = claim.billablePeriod.end | replace: "-", "" | truncate: 8, "" %}
+{% elsif claim.created %}
+  {% assign service_start = claim.created | replace: "-", "" | truncate: 8, "" %}
+  {% assign service_end = service_start %}
+{% endif %}
+
+{% comment %} Claim type - map to X12 claim frequency code {% endcomment %}
+{% assign claim_type = claim.type.coding[0].code | default: "professional" %}
+{% if claim_type == "institutional" %}
+  {% assign claim_type_code = "13" %}
+{% elsif claim_type == "professional" %}
+  {% assign claim_type_code = "14" %}
+{% elsif claim_type == "pharmacy" %}
+  {% assign claim_type_code = "16" %}
+{% elsif claim_type == "oral" %}
+  {% assign claim_type_code = "15" %}
+{% else %}
+  {% assign claim_type_code = "14" %}
+{% endif %}
+
+{
+    "delimiters": {
+        "elementSeparator": "*",
+        "subElementSeparator": ":",
+        "segmentTerminator": "~"
+    },
+    "x12Definition": [
+        { "ISA": ["00", "          ", "00", "          ", "ZZ", "{{ provider_id }}{% assign pad_len = 15 | minus: provider_id.size %}{% for i in (1..pad_len) %} {% endfor %}", "ZZ", "{{ payer_id }}{% assign pad_len2 = 15 | minus: payer_id.size %}{% for i in (1..pad_len2) %} {% endfor %}", "{{ now_date }}", "{{ now_time }}", "^", "00501", "{{ control_number }}", "0", "P", ":"] },
+        { "GS": ["HR", "{{ provider_id }}", "{{ payer_id }}", "{{ full_date }}", "{{ now_time }}", "{{ control_number }}", "X", "005010X212"] },
+        { "ST": ["276", "{{ control_number }}", "005010X212"] },
+        { "BHT": ["0010", "13", "{{ control_number }}", "{{ full_date }}", "{{ now_time }}", ""] },
+
+        {% comment %} 2000A - Information Source (Payer) {% endcomment %}
+        { "HL": ["1", "", "20", "1"] },
+
+        {% comment %} 2100A - Payer Name {% endcomment %}
+        { "NM1": ["PR", "2", "{{ payer.name | default: '' }}", "", "", "", "", "PI", "{{ payer_id }}"] },
+
+        {% comment %} 2000B - Information Receiver (Provider) {% endcomment %}
+        { "HL": ["2", "1", "21", "1"] },
+
+        {% comment %} 2100B - Provider Name {% endcomment %}
+        {% if practitioner %}
+        { "NM1": ["1P", "1", "{{ practitioner.name[0].family | default: '' }}", "{{ practitioner.name[0].given[0] | default: '' }}", "{{ practitioner.name[0].given[1] | default: '' }}", "", "", "XX", "{{ provider_id }}"] },
+        {% else %}
+        { "NM1": ["1P", "2", "{{ provider.name | default: '' }}", "", "", "", "", "XX", "{{ provider_id }}"] },
+        {% endif %}
+
+        {% comment %} 2000C - Subscriber / Patient {% endcomment %}
+        { "HL": ["3", "2", "22", "0"] },
+
+        {% comment %} 2100C - Subscriber Name {% endcomment %}
+        { "NM1": ["IL", "1", "{{ patient_last }}", "{{ patient_first }}", "{{ patient_middle }}", "", "", "MI", "{{ subscriber_id }}"] },
+
+        {% comment %} Subscriber Demographics {% endcomment %}
+        { "DMG": ["D8", "{{ patient_dob }}", "{{ patient_gender }}"] },
+
+        {% comment %} Trace Number {% endcomment %}
+        { "TRN": ["1", "{{ control_number }}", "{{ provider_id }}"] },
+
+        {% comment %} 2200C - Claim Status Tracking {% endcomment %}
+        {% comment %} Claim reference number {% endcomment %}
+        {% if claim_id != "" %}
+        { "REF": ["BLT", "{{ claim_id }}"] },
+        {% endif %}
+
+        {% comment %} Claim submitted amount {% endcomment %}
+        {% if claim_amount != "" %}
+        { "AMT": ["T3", "{{ claim_amount }}"] },
+        {% endif %}
+
+        {% comment %} Service date range {% endcomment %}
+        {% if service_start %}
+          {% if service_end and service_end != service_start %}
+        { "DTP": ["472", "RD8", "{{ service_start }}-{{ service_end }}"] },
+          {% else %}
+        { "DTP": ["472", "D8", "{{ service_start }}"] },
+          {% endif %}
+        {% endif %}
+
+        {% comment %} 2210C - Service Line Information {% endcomment %}
+        {% if claim.item %}
+        {% for item in claim.item %}
+        { "SVC": ["{{ item.productOrService.coding[0].system | default: 'HC' }}:{{ item.productOrService.coding[0].code | default: '' }}", "{{ item.net.value | default: '0' }}", "", "", "{{ item.quantity.value | default: '1' }}"] },
+          {% if item.servicedDate %}
+        { "DTP": ["472", "D8", "{{ item.servicedDate | replace: '-', '' }}"] },
+          {% elsif item.servicedPeriod %}
+        { "DTP": ["472", "RD8", "{{ item.servicedPeriod.start | replace: '-', '' | truncate: 8, '' }}-{{ item.servicedPeriod.end | replace: '-', '' | truncate: 8, '' }}"] },
+          {% endif %}
+        {% endfor %}
+        {% endif %}
+
+        { "SE": ["{{ msg.entry.size | plus: 13 }}", "{{ control_number }}"] },
+        { "GE": ["1", "{{ control_number }}"] },
+        { "IEA": ["1", "{{ control_number }}"] }
+    ]
+}

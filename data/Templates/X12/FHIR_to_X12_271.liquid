@@ -1,0 +1,203 @@
+{% comment %}
+  FHIR CoverageEligibilityResponse Bundle to X12 271 (Health Care Eligibility Benefit Response)
+
+  Expected input (msg): A FHIR Bundle containing:
+    - CoverageEligibilityResponse (primary resource)
+    - Patient (the subscriber/dependent)
+    - Organization (insurer / payer)
+    - Organization or Practitioner (provider / information source)
+    - Coverage (insurance coverage details)
+{% endcomment %}
+
+{% comment %} Extract resources from the Bundle {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "CoverageEligibilityResponse" %}
+    {% assign eligibilityResponse = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Patient" %}
+    {% assign patient = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Coverage" %}
+    {% assign coverage = entry.resource %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Find insurer and provider organizations {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "Organization" %}
+    {% if eligibilityResponse.insurer.reference contains entry.resource.id %}
+      {% assign insurer = entry.resource %}
+    {% endif %}
+    {% if eligibilityResponse.requestor.reference contains entry.resource.id %}
+      {% assign provider = entry.resource %}
+    {% endif %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Practitioner" %}
+    {% if eligibilityResponse.requestor.reference contains entry.resource.id %}
+      {% assign practitioner = entry.resource %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Date/Time {% endcomment %}
+{% assign now_date = "now" | now: "yyMMdd" %}
+{% assign now_time = "now" | now: "HHmm" %}
+{% assign full_date = "now" | now: "yyyyMMdd" %}
+
+{% comment %} Identifiers {% endcomment %}
+{% if insurer %}
+  {% assign insurer_id = insurer.identifier[0].value | default: "PAYER" %}
+{% else %}
+  {% assign insurer_id = "PAYER" %}
+{% endif %}
+
+{% if provider %}
+  {% assign provider_id = provider.identifier[0].value | default: "PROVIDER" %}
+{% elsif practitioner %}
+  {% assign provider_id = practitioner.identifier[0].value | default: "PROVIDER" %}
+{% else %}
+  {% assign provider_id = "PROVIDER" %}
+{% endif %}
+
+{% comment %} Patient details {% endcomment %}
+{% assign patient_last = patient.name[0].family | default: "" %}
+{% assign patient_first = patient.name[0].given[0] | default: "" %}
+{% assign patient_middle = patient.name[0].given[1] | default: "" %}
+{% assign patient_dob = patient.birthDate | replace: "-", "" %}
+
+{% if patient.gender == "male" %}
+  {% assign patient_gender = "M" %}
+{% elsif patient.gender == "female" %}
+  {% assign patient_gender = "F" %}
+{% else %}
+  {% assign patient_gender = "U" %}
+{% endif %}
+
+{% comment %} Coverage details {% endcomment %}
+{% assign subscriber_id = coverage.subscriberId | default: "" %}
+{% assign group_number = coverage.class[0].value | default: "" %}
+
+{% comment %} Control number {% endcomment %}
+{% assign control_number = eligibilityResponse.id | default: "000000001" | truncate: 9, "" %}
+
+{% comment %} Response date {% endcomment %}
+{% assign response_date = eligibilityResponse.created | replace: "-", "" | truncate: 8, "" %}
+
+{
+    "delimiters": {
+        "elementSeparator": "*",
+        "subElementSeparator": ":",
+        "segmentTerminator": "~"
+    },
+    "x12Definition": [
+        { "ISA": ["00", "          ", "00", "          ", "ZZ", "{{ insurer_id }}{% assign pad_len = 15 | minus: insurer_id.size %}{% for i in (1..pad_len) %} {% endfor %}", "ZZ", "{{ provider_id }}{% assign pad_len2 = 15 | minus: provider_id.size %}{% for i in (1..pad_len2) %} {% endfor %}", "{{ now_date }}", "{{ now_time }}", "^", "00501", "{{ control_number }}", "0", "P", ":"] },
+        { "GS": ["HB", "{{ insurer_id }}", "{{ provider_id }}", "{{ full_date }}", "{{ now_time }}", "{{ control_number }}", "X", "005010X279A1"] },
+        { "ST": ["271", "{{ control_number }}", "005010X279A1"] },
+        { "BHT": ["0022", "11", "{{ control_number }}", "{{ response_date }}", "{{ now_time }}", ""] },
+
+        {% comment %} 2000A - Information Source (Payer) {% endcomment %}
+        { "HL": ["1", "", "20", "1"] },
+
+        {% comment %} 2100A - Payer Name {% endcomment %}
+        { "NM1": ["PR", "2", "{{ insurer.name | default: '' }}", "", "", "", "", "PI", "{{ insurer_id }}"] },
+
+        {% comment %} 2000B - Information Receiver (Provider) {% endcomment %}
+        { "HL": ["2", "1", "21", "1"] },
+
+        {% comment %} 2100B - Provider Name {% endcomment %}
+        {% if practitioner %}
+        { "NM1": ["1P", "1", "{{ practitioner.name[0].family | default: '' }}", "{{ practitioner.name[0].given[0] | default: '' }}", "", "", "", "XX", "{{ provider_id }}"] },
+        {% else %}
+        { "NM1": ["1P", "2", "{{ provider.name | default: '' }}", "", "", "", "", "XX", "{{ provider_id }}"] },
+        {% endif %}
+
+        {% comment %} 2000C - Subscriber {% endcomment %}
+        { "HL": ["3", "2", "22", "0"] },
+
+        { "TRN": ["2", "{{ control_number }}", "{{ insurer_id }}"] },
+
+        {% comment %} 2100C - Subscriber Name {% endcomment %}
+        { "NM1": ["IL", "1", "{{ patient_last }}", "{{ patient_first }}", "{{ patient_middle }}", "", "", "MI", "{{ subscriber_id }}"] },
+
+        {% comment %} Subscriber Address {% endcomment %}
+        {% if patient.address[0] %}
+        { "N3": ["{{ patient.address[0].line[0] | default: '' }}", "{{ patient.address[0].line[1] | default: '' }}"] },
+        { "N4": ["{{ patient.address[0].city | default: '' }}", "{{ patient.address[0].state | default: '' }}", "{{ patient.address[0].postalCode | default: '' }}"] },
+        {% endif %}
+
+        {% comment %} Subscriber Demographics {% endcomment %}
+        { "DMG": ["D8", "{{ patient_dob }}", "{{ patient_gender }}"] },
+
+        {% comment %} Subscriber Dates {% endcomment %}
+        { "DTP": ["307", "D8", "{{ response_date | default: full_date }}"] },
+
+        {% comment %} 2110C - Eligibility/Benefit Information {% endcomment %}
+        {% assign outcome = eligibilityResponse.outcome | default: "complete" %}
+        {% if outcome == "complete" or outcome == "partial" %}
+
+        {% for insurance in eligibilityResponse.insurance %}
+          {% comment %} Coverage active indicator {% endcomment %}
+          {% if insurance.inforce == true %}
+            { "EB": ["1", "", "30", "", "", "", "", "", "", "", "", "Y"] },
+          {% else %}
+            { "EB": ["6", "", "30"] },
+          {% endif %}
+
+          {% for benefit in insurance.item %}
+            {% comment %} Map benefit category to X12 service type {% endcomment %}
+            {% assign svc_code = benefit.category.coding[0].code | default: "30" %}
+
+            {% if benefit.benefit %}
+              {% for ben_detail in benefit.benefit %}
+                {% comment %} Determine EB information code based on benefit type {% endcomment %}
+                {% assign ben_type = ben_detail.type.coding[0].code | default: "" %}
+                {% if ben_type == "deductible" %}
+                  {% assign eb_code = "C" %}
+                {% elsif ben_type == "copay" %}
+                  {% assign eb_code = "B" %}
+                {% elsif ben_type == "coinsurance" %}
+                  {% assign eb_code = "A" %}
+                {% else %}
+                  {% assign eb_code = "1" %}
+                {% endif %}
+
+                {% comment %} Extract monetary or percentage values {% endcomment %}
+                {% if ben_detail.allowedMoney %}
+                  { "EB": ["{{ eb_code }}", "IND", "{{ svc_code }}", "", "", "{{ ben_detail.allowedMoney.value }}"] },
+                  {% if ben_detail.allowedMoney.value %}
+                  { "MSG": ["{{ ben_type | default: 'Benefit' }}: {{ ben_detail.allowedMoney.currency | default: 'USD' }} {{ ben_detail.allowedMoney.value }}"] },
+                  {% endif %}
+                {% elsif ben_detail.allowedUnsignedInt %}
+                  { "EB": ["{{ eb_code }}", "IND", "{{ svc_code }}", "", "", "", "", "", "{{ ben_detail.allowedUnsignedInt }}"] },
+                {% elsif ben_detail.usedMoney %}
+                  { "EB": ["{{ eb_code }}", "IND", "{{ svc_code }}", "", "", "{{ ben_detail.usedMoney.value }}"] },
+                {% else %}
+                  { "EB": ["{{ eb_code }}", "IND", "{{ svc_code }}"] },
+                {% endif %}
+              {% endfor %}
+            {% else %}
+              { "EB": ["1", "IND", "{{ svc_code }}"] },
+            {% endif %}
+
+            {% comment %} Benefit date range {% endcomment %}
+            {% if benefit.benefitPeriod %}
+              { "DTP": ["291", "RD8", "{{ benefit.benefitPeriod.start | replace: '-', '' | truncate: 8, '' }}-{{ benefit.benefitPeriod.end | replace: '-', '' | truncate: 8, '' }}"] },
+            {% endif %}
+          {% endfor %}
+        {% endfor %}
+
+        {% else %}
+          {% comment %} Error / rejected response {% endcomment %}
+          { "AAA": ["N", "", "72", "{{ eligibilityResponse.error[0].code.coding[0].code | default: '' }}"] },
+        {% endif %}
+
+        {% comment %} Subscriber Reference - Group Number {% endcomment %}
+        {% if group_number != "" %}
+        { "REF": ["18", "{{ group_number }}"] },
+        {% endif %}
+
+        { "SE": ["{{ msg.entry.size | plus: 14 }}", "{{ control_number }}"] },
+        { "GE": ["1", "{{ control_number }}"] },
+        { "IEA": ["1", "{{ control_number }}"] }
+    ]
+}
