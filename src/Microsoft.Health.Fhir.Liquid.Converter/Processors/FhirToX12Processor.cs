@@ -3,13 +3,8 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
-using System;
-using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text;
-using System.Threading;
-using DotLiquid;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Liquid.Converter.Exceptions;
 using Microsoft.Health.Fhir.Liquid.Converter.Models;
@@ -28,6 +23,8 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.Processors
             : base(processorSettings, logger)
         {
         }
+
+        protected override DataType DataType { get; set; } = DataType.X12;
 
         protected override string InternalConvert(string data, string rootTemplate, ITemplateProvider templateProvider, TraceInfo traceInfo = null)
         {
@@ -104,21 +101,5 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.Processors
             return sb.ToString();
         }
 
-        protected override Context CreateContext(ITemplateProvider templateProvider, IDictionary<string, object> data, string rootTemplate)
-        {
-            var cancellationToken = Settings.TimeOut > 0 ? new CancellationTokenSource(Settings.TimeOut).Token : CancellationToken.None;
-            var context = new Context(
-                environments: new List<Hash> { Hash.FromDictionary(data) },
-                outerScope: new Hash(),
-                registers: Hash.FromDictionary(new Dictionary<string, object> { { "file_system", templateProvider.GetTemplateFileSystem() } }),
-                errorsOutputMode: ErrorsOutputMode.Rethrow,
-                maxIterations: Settings.MaxIterations,
-                formatProvider: CultureInfo.InvariantCulture,
-                cancellationToken: cancellationToken);
-
-            context.AddFilters(typeof(Filters));
-
-            return context;
-        }
     }
 }

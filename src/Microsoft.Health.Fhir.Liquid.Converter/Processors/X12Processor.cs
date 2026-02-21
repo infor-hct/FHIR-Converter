@@ -3,14 +3,11 @@
 // Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
 // -------------------------------------------------------------------------------------------------
 
-using System.Collections.Generic;
-using System.Linq;
 using DotLiquid;
 using Microsoft.Extensions.Logging;
 using Microsoft.Health.Fhir.Liquid.Converter.Models;
 using Microsoft.Health.Fhir.Liquid.Converter.Models.X12;
 using Microsoft.Health.Fhir.Liquid.Converter.Parsers;
-using Microsoft.Health.Fhir.Liquid.Converter.Utilities;
 using Microsoft.Health.MeasurementUtility;
 
 namespace Microsoft.Health.Fhir.Liquid.Converter.Processors
@@ -38,12 +35,6 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.Processors
             }
 
             return InternalConvertFromObject(x12Data, rootTemplate, templateProvider, traceInfo);
-        }
-
-        protected override Context CreateContext(ITemplateProvider templateProvider, IDictionary<string, object> data, string rootTemplate)
-        {
-            var context = base.CreateContext(templateProvider, data, rootTemplate);
-            return context;
         }
 
         protected override void CreateTraceInfo(object data, Context context, TraceInfo traceInfo)
