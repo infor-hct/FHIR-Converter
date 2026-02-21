@@ -100,7 +100,7 @@ namespace Microsoft.Health.Fhir.Liquid.Converter
                             // HL03 contains the level code
                             if (hlSegment.Elements.Count > 3)
                             {
-                                return hlSegment.Elements[3]?.Value ?? string.Empty;
+                                return ((X12Element)hlSegment.Elements[3])?.Value ?? string.Empty;
                             }
 
                             break;

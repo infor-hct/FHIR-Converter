@@ -47,7 +47,7 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.Parsers
                     }
 
                     var elements = ParseElements(segment, delimiters);
-                    var segmentId = elements.Count > 0 ? elements[0]?.Value ?? string.Empty : string.Empty;
+                    var segmentId = elements.Count > 0 ? ((X12Element)elements[0])?.Value ?? string.Empty : string.Empty;
                     var x12Segment = new X12Segment(segmentId, segment, elements);
 
                     result.Meta.Add(segmentId);
