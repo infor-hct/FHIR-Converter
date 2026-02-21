@@ -8,7 +8,6 @@
 {% endcomment -%}
 
 {% assign firstSegs = x12Data | get_first_x12_segments: 'ISA|GS|ST|BGN' -%}
-{% assign segLists = x12Data | get_x12_segment_lists: 'NM1|REF|DTP|CAT|LX|TRN|BIN|EFI' -%}
 {% assign nm1Segments = x12Data | get_x12_segments_by_type: 'NM1' -%}
 {% assign refSegments = x12Data | get_x12_segments_by_type: 'REF' -%}
 {% assign dtpSegments = x12Data | get_x12_segments_by_type: 'DTP' -%}

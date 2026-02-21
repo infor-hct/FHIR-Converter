@@ -22,7 +22,6 @@
 {% assign allSV2 = x12Data | get_x12_segments_by_type: 'SV2' -%}
 {% assign allHI = x12Data | get_x12_segments_by_type: 'HI' -%}
 {% assign allCL1 = x12Data | get_x12_segments_by_type: 'CL1' -%}
-{% assign segLists = x12Data | get_x12_segment_lists: 'NM1|HL|REF|DTP|UM|HCR|SV1|SV2|HI|CL1|CR1|CR2|CR3|CR4|CR5|CR6' -%}
 {% comment %} Identify HL loops by level code (HL03) {% endcomment -%}
 {% comment %}
   HL03 codes for 278:
