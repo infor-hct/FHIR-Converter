@@ -1,0 +1,395 @@
+{% comment %}
+  X12 275 - Additional Information to Support a Health Care Claim or Encounter (Attachments)
+  Converts X12 275 transaction to FHIR R4 Bundle containing:
+    - DocumentReference (attachment information)
+    - Patient
+    - Organization (payer, provider)
+    - Practitioner
+{% endcomment -%}
+
+{% assign firstSegs = x12Data | get_first_x12_segments: 'ISA|GS|ST|BGN' -%}
+{% assign nm1Segments = x12Data | get_x12_segments_by_type: 'NM1' -%}
+{% assign refSegments = x12Data | get_x12_segments_by_type: 'REF' -%}
+{% assign dtpSegments = x12Data | get_x12_segments_by_type: 'DTP' -%}
+{% assign lxSegments = x12Data | get_x12_segments_by_type: 'LX' -%}
+{% assign trnSegments = x12Data | get_x12_segments_by_type: 'TRN' -%}
+{% assign binSegments = x12Data | get_x12_segments_by_type: 'BIN' -%}
+{% assign efiSegments = x12Data | get_x12_segments_by_type: 'EFI' -%}
+{% assign catSegments = x12Data | get_x12_segments_by_type: 'CAT' -%}
+
+{% comment %} Extract payer, provider, and patient from NM1 segments {% endcomment -%}
+{% assign payerNM1 = null -%}
+{% assign providerNM1 = null -%}
+{% assign patientNM1 = null -%}
+{% for nm1 in nm1Segments -%}
+  {% if nm1.Elements[1].Value == "PR" -%}
+    {% assign payerNM1 = nm1 -%}
+  {% endif -%}
+  {% if nm1.Elements[1].Value == "1P" or nm1.Elements[1].Value == "85" -%}
+    {% assign providerNM1 = nm1 -%}
+  {% endif -%}
+  {% if nm1.Elements[1].Value == "QC" or nm1.Elements[1].Value == "IL" -%}
+    {% assign patientNM1 = nm1 -%}
+  {% endif -%}
+{% endfor -%}
+
+{% comment %} Extract claim and attachment control number references {% endcomment -%}
+{% assign claimRef = null -%}
+{% assign attachCtrlNum = null -%}
+{% for ref in refSegments -%}
+  {% if ref.Elements[1].Value == "EJ" -%}
+    {% assign claimRef = ref -%}
+  {% endif -%}
+  {% if ref.Elements[1].Value == "BT" -%}
+    {% assign attachCtrlNum = ref -%}
+  {% endif -%}
+{% endfor -%}
+
+{% comment %} Extract service date from DTP segments {% endcomment -%}
+{% assign serviceDate = null -%}
+{% for dtp in dtpSegments -%}
+  {% if dtp.Elements[1].Value == "472" or dtp.Elements[1].Value == "368" -%}
+    {% assign serviceDate = dtp -%}
+  {% endif -%}
+{% endfor -%}
+
+{% comment %} Build the Bundle ID from interchange and transaction info {% endcomment -%}
+{% assign bundleId = firstSegs.ISA.Elements[13].Value -%}
+{
+  "resourceType": "Bundle",
+  "type": "batch",
+  {% if firstSegs.GS -%}
+    "timestamp": "{{ firstSegs.GS.Elements[4].Value | slice: 0, 4 }}-{{ firstSegs.GS.Elements[4].Value | slice: 4, 2 }}-{{ firstSegs.GS.Elements[4].Value | slice: 6, 2 }}T00:00:00Z",
+  {% endif -%}
+  "identifier": {
+    "value": "{{ bundleId }}"
+  },
+  "id": "{{ bundleId }}",
+  "entry": [
+    {% comment %} DocumentReference Resource {% endcomment -%}
+    {
+      "fullUrl": "urn:uuid:docref-{{ bundleId }}",
+      "resource": {
+        "resourceType": "DocumentReference",
+        "id": "docref-{{ bundleId }}",
+        "status": "current",
+        {% if firstSegs.BGN -%}
+          "masterIdentifier": {
+            "system": "urn:ietf:rfc:3986",
+            "value": "{{ firstSegs.BGN.Elements[2].Value }}"
+          },
+        {% endif -%}
+        "identifier": [
+          {% if attachCtrlNum -%}
+            {
+              "type": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                    "code": "ACSN",
+                    "display": "Accession ID"
+                  }
+                ]
+              },
+              "value": "{{ attachCtrlNum.Elements[2].Value }}"
+            }{% if claimRef %},{% endif %}
+          {% endif -%}
+          {% if claimRef -%}
+            {
+              "type": {
+                "coding": [
+                  {
+                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                    "code": "FILL",
+                    "display": "Filler Identifier"
+                  }
+                ]
+              },
+              "value": "{{ claimRef.Elements[2].Value }}"
+            }
+          {% endif -%}
+        ],
+        "type": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "11506-3",
+              "display": "Progress note"
+            }
+          ]
+        },
+        {% if catSegments.size > 0 -%}
+          {% assign firstCat = catSegments[0] -%}
+          "category": [
+            {
+              "coding": [
+                {
+                  "system": "http://loinc.org",
+                  "code": "{{ firstCat.Elements[1].Value }}",
+                  "display": "{{ firstCat.Elements[2].Value }}"
+                }
+              ]
+            }
+          ],
+        {% endif -%}
+        {% if patientNM1 -%}
+          "subject": {
+            "reference": "Patient/patient-{{ patientNM1.Elements[9].Value | default: bundleId }}"
+          },
+        {% endif -%}
+        {% if serviceDate -%}
+          "date": "{{ serviceDate.Elements[3].Value | slice: 0, 4 }}-{{ serviceDate.Elements[3].Value | slice: 4, 2 }}-{{ serviceDate.Elements[3].Value | slice: 6, 2 }}T00:00:00Z",
+        {% endif -%}
+        {% if providerNM1 -%}
+          "author": [
+            {
+              "reference": "Practitioner/practitioner-{{ providerNM1.Elements[9].Value | default: bundleId }}"
+            }
+          ],
+        {% endif -%}
+        "content": [
+          {% for lx in lxSegments -%}
+            {% assign lxIndex = forloop.index0 -%}
+            {
+              "attachment": {
+                {% if efiSegments.size > lxIndex -%}
+                  {% assign efi = efiSegments[lxIndex] -%}
+                  {% if efi.Elements[1].Value == "PDF" -%}
+                    "contentType": "application/pdf",
+                  {% elsif efi.Elements[1].Value == "JPG" or efi.Elements[1].Value == "JPEG" -%}
+                    "contentType": "image/jpeg",
+                  {% elsif efi.Elements[1].Value == "PNG" -%}
+                    "contentType": "image/png",
+                  {% elsif efi.Elements[1].Value == "TXT" or efi.Elements[1].Value == "TX" -%}
+                    "contentType": "text/plain",
+                  {% elsif efi.Elements[1].Value == "HTML" or efi.Elements[1].Value == "HT" -%}
+                    "contentType": "text/html",
+                  {% elsif efi.Elements[1].Value == "XML" -%}
+                    "contentType": "application/xml",
+                  {% elsif efi.Elements[1].Value == "TIFF" or efi.Elements[1].Value == "TIF" -%}
+                    "contentType": "image/tiff",
+                  {% else -%}
+                    "contentType": "application/octet-stream",
+                  {% endif -%}
+                {% else -%}
+                  "contentType": "application/octet-stream",
+                {% endif -%}
+                {% if binSegments.size > lxIndex -%}
+                  {% assign bin = binSegments[lxIndex] -%}
+                  {% if bin.Elements[2] -%}
+                    "data": "{{ bin.Elements[2].Value }}",
+                  {% endif -%}
+                {% endif -%}
+                "title": "Attachment {{ lx.Elements[1].Value }}"
+              }
+            }{% unless forloop.last %},{% endunless %}
+          {% endfor -%}
+          {% if lxSegments.size == 0 and binSegments.size > 0 -%}
+            {% for bin in binSegments -%}
+              {% assign binIndex = forloop.index0 -%}
+              {
+                "attachment": {
+                  {% if efiSegments.size > binIndex -%}
+                    {% assign efi = efiSegments[binIndex] -%}
+                    {% if efi.Elements[1].Value == "PDF" -%}
+                      "contentType": "application/pdf",
+                    {% elsif efi.Elements[1].Value == "TXT" or efi.Elements[1].Value == "TX" -%}
+                      "contentType": "text/plain",
+                    {% else -%}
+                      "contentType": "application/octet-stream",
+                    {% endif -%}
+                  {% else -%}
+                    "contentType": "application/octet-stream",
+                  {% endif -%}
+                  {% if bin.Elements[2] -%}
+                    "data": "{{ bin.Elements[2].Value }}",
+                  {% endif -%}
+                  "title": "Attachment {{ forloop.index }}"
+                }
+              }{% unless forloop.last %},{% endunless %}
+            {% endfor -%}
+          {% endif -%}
+        ],
+        {% if trnSegments.size > 0 -%}
+          "relatesTo": [
+            {% for trn in trnSegments -%}
+              {
+                "code": "appends",
+                "target": {
+                  "identifier": {
+                    "system": "{{ trn.Elements[3].Value }}",
+                    "value": "{{ trn.Elements[2].Value }}"
+                  }
+                }
+              }{% unless forloop.last %},{% endunless %}
+            {% endfor -%}
+          ],
+        {% endif -%}
+        {% if payerNM1 -%}
+          "custodian": {
+            "reference": "Organization/org-payer-{{ payerNM1.Elements[9].Value | default: bundleId }}"
+          },
+        {% endif -%}
+        "description": "Additional Information to Support a Health Care Claim"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "DocumentReference/docref-{{ bundleId }}"
+      }
+    },
+
+    {% comment %} Patient Resource {% endcomment -%}
+    {% if patientNM1 -%}
+      {
+        "fullUrl": "urn:uuid:patient-{{ patientNM1.Elements[9].Value | default: bundleId }}",
+        "resource": {
+          "resourceType": "Patient",
+          "id": "patient-{{ patientNM1.Elements[9].Value | default: bundleId }}",
+          "identifier": [
+            {
+              {% if patientNM1.Elements[8].Value == "MI" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "MB",
+                      "display": "Member Number"
+                    }
+                  ]
+                },
+              {% elsif patientNM1.Elements[8].Value == "34" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "SS",
+                      "display": "Social Security Number"
+                    }
+                  ]
+                },
+              {% endif -%}
+              "value": "{{ patientNM1.Elements[9].Value }}"
+            }
+          ],
+          "name": [
+            {
+              {% if patientNM1.Elements[3].Value != "" -%}
+                "family": "{{ patientNM1.Elements[3].Value }}",
+              {% endif -%}
+              {% if patientNM1.Elements[4].Value != "" -%}
+                "given": [
+                  "{{ patientNM1.Elements[4].Value }}"
+                  {% if patientNM1.Elements[5].Value != "" -%}
+                    , "{{ patientNM1.Elements[5].Value }}"
+                  {% endif -%}
+                ],
+              {% endif -%}
+              "use": "official"
+            }
+          ]
+        },
+        "request": {
+          "method": "PUT",
+          "url": "Patient/patient-{{ patientNM1.Elements[9].Value | default: bundleId }}"
+        }
+      },
+    {% endif -%}
+
+    {% comment %} Payer Organization Resource {% endcomment -%}
+    {% if payerNM1 -%}
+      {
+        "fullUrl": "urn:uuid:org-payer-{{ payerNM1.Elements[9].Value | default: bundleId }}",
+        "resource": {
+          "resourceType": "Organization",
+          "id": "org-payer-{{ payerNM1.Elements[9].Value | default: bundleId }}",
+          "identifier": [
+            {
+              {% if payerNM1.Elements[8].Value == "PI" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "NIIP",
+                      "display": "Payor ID"
+                    }
+                  ]
+                },
+              {% elsif payerNM1.Elements[8].Value == "XV" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "NIIP",
+                      "display": "National Plan Identifier"
+                    }
+                  ]
+                },
+              {% endif -%}
+              "value": "{{ payerNM1.Elements[9].Value }}"
+            }
+          ],
+          {% if payerNM1.Elements[2].Value == "2" -%}
+            "name": "{{ payerNM1.Elements[3].Value }}",
+          {% else -%}
+            "name": "{{ payerNM1.Elements[3].Value }}{% if payerNM1.Elements[4].Value != "" %} {{ payerNM1.Elements[4].Value }}{% endif %}",
+          {% endif -%}
+          "type": [
+            {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                  "code": "ins",
+                  "display": "Insurance Company"
+                }
+              ]
+            }
+          ]
+        },
+        "request": {
+          "method": "PUT",
+          "url": "Organization/org-payer-{{ payerNM1.Elements[9].Value | default: bundleId }}"
+        }
+      },
+    {% endif -%}
+
+    {% comment %} Provider Organization Resource {% endcomment -%}
+    {% if providerNM1 -%}
+      {
+        "fullUrl": "urn:uuid:practitioner-{{ providerNM1.Elements[9].Value | default: bundleId }}",
+        "resource": {
+          "resourceType": "Practitioner",
+          "id": "practitioner-{{ providerNM1.Elements[9].Value | default: bundleId }}",
+          "identifier": [
+            {
+              {% if providerNM1.Elements[8].Value == "XX" -%}
+                "system": "http://hl7.org/fhir/sid/us-npi",
+              {% endif -%}
+              "value": "{{ providerNM1.Elements[9].Value }}"
+            }
+          ],
+          "name": [
+            {
+              {% if providerNM1.Elements[2].Value == "1" -%}
+                {% if providerNM1.Elements[3].Value != "" -%}
+                  "family": "{{ providerNM1.Elements[3].Value }}",
+                {% endif -%}
+                {% if providerNM1.Elements[4].Value != "" -%}
+                  "given": [
+                    "{{ providerNM1.Elements[4].Value }}"
+                  ],
+                {% endif -%}
+              {% else -%}
+                "text": "{{ providerNM1.Elements[3].Value }}",
+              {% endif -%}
+              "use": "official"
+            }
+          ]
+        },
+        "request": {
+          "method": "PUT",
+          "url": "Practitioner/practitioner-{{ providerNM1.Elements[9].Value | default: bundleId }}"
+        }
+      }
+    {% endif -%}
+  ]
+}

@@ -1,0 +1,273 @@
+{% comment %}
+  FHIR ClaimResponse Bundle to X12 277 (Health Care Claim Status Notification)
+
+  Expected input (msg): A FHIR Bundle containing:
+    - ClaimResponse (primary resource with adjudication/status information)
+    - Patient (the subscriber/member)
+    - Organization (insurer/payer)
+    - Organization or Practitioner (provider)
+    - Claim (the original claim)
+    - Coverage (insurance coverage)
+{% endcomment %}
+
+{% comment %} Extract resources from the Bundle {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "ClaimResponse" %}
+    {% assign claimResponse = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Patient" %}
+    {% assign patient = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Claim" %}
+    {% assign claim = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Coverage" %}
+    {% assign coverage = entry.resource %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Find payer and provider organizations {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "Organization" %}
+    {% if claimResponse.insurer.reference contains entry.resource.id %}
+      {% assign payer = entry.resource %}
+    {% elsif claimResponse.requestor.reference contains entry.resource.id %}
+      {% assign provider = entry.resource %}
+    {% elsif claim.provider.reference contains entry.resource.id %}
+      {% assign provider = entry.resource %}
+    {% elsif claim.insurer.reference contains entry.resource.id %}
+      {% assign payer = entry.resource %}
+    {% endif %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Practitioner" %}
+    {% if claimResponse.requestor.reference contains entry.resource.id %}
+      {% assign practitioner = entry.resource %}
+    {% elsif claim.provider.reference contains entry.resource.id %}
+      {% assign practitioner = entry.resource %}
+    {% endif %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Fallback assignment for organizations {% endcomment %}
+{% if payer == nil or provider == nil %}
+  {% assign org_index = 0 %}
+  {% for entry in msg.entry %}
+    {% if entry.resource.resourceType == "Organization" %}
+      {% if org_index == 0 and payer == nil %}
+        {% assign payer = entry.resource %}
+      {% elsif org_index == 1 and provider == nil %}
+        {% assign provider = entry.resource %}
+      {% endif %}
+      {% assign org_index = org_index | plus: 1 %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% comment %} Date/Time {% endcomment %}
+{% assign now_date = "now" | now: "yyMMdd" %}
+{% assign now_time = "now" | now: "HHmm" %}
+{% assign full_date = "now" | now: "yyyyMMdd" %}
+
+{% comment %} Identifiers {% endcomment %}
+{% if payer %}
+  {% assign payer_id = payer.identifier[0].value | default: "PAYER" %}
+{% else %}
+  {% assign payer_id = "PAYER" %}
+{% endif %}
+
+{% if provider %}
+  {% assign provider_id = provider.identifier[0].value | default: "PROVIDER" %}
+{% elsif practitioner %}
+  {% assign provider_id = practitioner.identifier[0].value | default: "PROVIDER" %}
+{% else %}
+  {% assign provider_id = "PROVIDER" %}
+{% endif %}
+
+{% comment %} Patient details {% endcomment %}
+{% assign patient_last = patient.name[0].family | default: "" %}
+{% assign patient_first = patient.name[0].given[0] | default: "" %}
+{% assign patient_middle = patient.name[0].given[1] | default: "" %}
+
+{% comment %} Subscriber ID {% endcomment %}
+{% assign subscriber_id = coverage.subscriberId | default: "" %}
+{% if subscriber_id == "" %}
+  {% assign subscriber_id = patient.identifier[0].value | default: "" %}
+{% endif %}
+
+{% comment %} Control number {% endcomment %}
+{% assign control_number = claimResponse.id | default: "000000001" | truncate: 9, "" %}
+
+{% comment %} Map ClaimResponse outcome to X12 status codes {% endcomment %}
+{% assign outcome = claimResponse.outcome | default: "" %}
+{% if outcome == "complete" %}
+  {% assign status_category = "F2" %}
+  {% assign status_code = "20" %}
+{% elsif outcome == "partial" %}
+  {% assign status_category = "F1" %}
+  {% assign status_code = "19" %}
+{% elsif outcome == "error" %}
+  {% assign status_category = "F3" %}
+  {% assign status_code = "21" %}
+{% elsif outcome == "queued" %}
+  {% assign status_category = "F0" %}
+  {% assign status_code = "0" %}
+{% else %}
+  {% assign status_category = "F0" %}
+  {% assign status_code = "0" %}
+{% endif %}
+
+{% comment %} Claim type mapping {% endcomment %}
+{% assign claim_type = claimResponse.type.coding[0].code | default: "professional" %}
+{% if claim_type == "institutional" %}
+  {% assign claim_type_code = "13" %}
+{% elsif claim_type == "professional" %}
+  {% assign claim_type_code = "14" %}
+{% elsif claim_type == "pharmacy" %}
+  {% assign claim_type_code = "16" %}
+{% elsif claim_type == "oral" %}
+  {% assign claim_type_code = "15" %}
+{% else %}
+  {% assign claim_type_code = "14" %}
+{% endif %}
+
+{% comment %} Amounts {% endcomment %}
+{% assign total_charged = "" %}
+{% assign total_paid = "" %}
+{% if claimResponse.total %}
+  {% for total_entry in claimResponse.total %}
+    {% if total_entry.category.coding[0].code == "submitted" %}
+      {% assign total_charged = total_entry.amount.value %}
+    {% endif %}
+    {% if total_entry.category.coding[0].code == "benefit" %}
+      {% assign total_paid = total_entry.amount.value %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% comment %} Effective date (process date) {% endcomment %}
+{% assign process_date = claimResponse.created | replace: "-", "" | truncate: 8, "" %}
+
+{% comment %} Service dates from claim {% endcomment %}
+{% if claim.billablePeriod %}
+  {% assign service_start = claim.billablePeriod.start | replace: "-", "" | truncate: 8, "" %}
+  {% assign service_end = claim.billablePeriod.end | replace: "-", "" | truncate: 8, "" %}
+{% endif %}
+
+{% comment %} Claim payer reference number {% endcomment %}
+{% assign payer_claim_number = claimResponse.identifier[0].value | default: "" %}
+
+{
+    "delimiters": {
+        "elementSeparator": "*",
+        "subElementSeparator": ":",
+        "segmentTerminator": "~"
+    },
+    "x12Definition": [
+        { "ISA": ["00", "          ", "00", "          ", "ZZ", "{{ payer_id }}{% assign pad_len = 15 | minus: payer_id.size %}{% for i in (1..pad_len) %} {% endfor %}", "ZZ", "{{ provider_id }}{% assign pad_len2 = 15 | minus: provider_id.size %}{% for i in (1..pad_len2) %} {% endfor %}", "{{ now_date }}", "{{ now_time }}", "^", "00501", "{{ control_number }}", "0", "P", ":"] },
+        { "GS": ["HN", "{{ payer_id }}", "{{ provider_id }}", "{{ full_date }}", "{{ now_time }}", "{{ control_number }}", "X", "005010X212"] },
+        { "ST": ["277", "{{ control_number }}", "005010X212"] },
+        { "BHT": ["0085", "08", "{{ control_number }}", "{{ process_date | default: full_date }}", "{{ now_time }}", "DG"] },
+
+        {% comment %} 2000A - Information Source (Payer) {% endcomment %}
+        { "HL": ["1", "", "20", "1"] },
+
+        {% comment %} 2100A - Payer Identification {% endcomment %}
+        { "NM1": ["PR", "2", "{{ payer.name | default: '' }}", "", "", "", "", "PI", "{{ payer_id }}"] },
+
+        {% comment %} Payer Contact Information {% endcomment %}
+        {% if payer.telecom[0] %}
+        { "PER": ["IC", "{{ payer.name | default: '' }}", "TE", "{{ payer.telecom[0].value | default: '' }}"] },
+        {% endif %}
+
+        {% comment %} 2000B - Information Receiver (Provider) {% endcomment %}
+        { "HL": ["2", "1", "21", "1"] },
+
+        {% comment %} 2100B - Provider Identification {% endcomment %}
+        {% if practitioner %}
+        { "NM1": ["1P", "1", "{{ practitioner.name[0].family | default: '' }}", "{{ practitioner.name[0].given[0] | default: '' }}", "", "", "", "XX", "{{ provider_id }}"] },
+        {% else %}
+        { "NM1": ["1P", "2", "{{ provider.name | default: '' }}", "", "", "", "", "XX", "{{ provider_id }}"] },
+        {% endif %}
+
+        {% comment %} 2000C - Billing Provider Detail {% endcomment %}
+        { "HL": ["3", "2", "19", "1"] },
+
+        {% comment %} 2000D - Patient Detail {% endcomment %}
+        { "HL": ["4", "3", "22", "0"] },
+
+        {% comment %} 2100D - Patient Name {% endcomment %}
+        { "NM1": ["QC", "1", "{{ patient_last }}", "{{ patient_first }}", "{{ patient_middle }}", "", "", "MI", "{{ subscriber_id }}"] },
+
+        {% comment %} Trace Number {% endcomment %}
+        { "TRN": ["2", "{{ control_number }}", "{{ payer_id }}"] },
+
+        {% comment %} 2200D - Claim Status Tracking {% endcomment %}
+        {% comment %} Payer claim control number {% endcomment %}
+        {% if payer_claim_number != "" %}
+        { "REF": ["1K", "{{ payer_claim_number }}"] },
+        {% endif %}
+
+        {% comment %} Claim level status {% endcomment %}
+        { "STC": ["{{ status_category }}:{{ status_code }}:{{ claimResponse.disposition | default: '' }}", "{{ process_date | default: full_date }}", "", "{{ total_charged }}", "{{ total_paid }}"] },
+
+        {% comment %} Service date range {% endcomment %}
+        {% if service_start %}
+          {% if service_end and service_end != service_start %}
+        { "DTP": ["472", "RD8", "{{ service_start }}-{{ service_end }}"] },
+          {% else %}
+        { "DTP": ["472", "D8", "{{ service_start }}"] },
+          {% endif %}
+        {% endif %}
+
+        {% comment %} 2210D - Service Line Information {% endcomment %}
+        {% if claimResponse.item %}
+        {% for item in claimResponse.item %}
+          {% comment %} Find corresponding claim item for service code {% endcomment %}
+          {% assign item_seq = item.itemSequence %}
+          {% assign svc_code = "" %}
+          {% assign svc_charged = "" %}
+          {% if claim.item %}
+            {% for claim_item in claim.item %}
+              {% if claim_item.sequence == item_seq %}
+                {% assign svc_code = claim_item.productOrService.coding[0].code | default: "" %}
+                {% assign svc_charged = claim_item.net.value | default: "" %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+
+          {% comment %} Adjudication amounts {% endcomment %}
+          {% assign svc_paid = "" %}
+          {% for adj in item.adjudication %}
+            {% if adj.category.coding[0].code == "benefit" %}
+              {% assign svc_paid = adj.amount.value %}
+            {% endif %}
+          {% endfor %}
+
+          { "SVC": ["HC:{{ svc_code }}", "{{ svc_charged }}", "{{ svc_paid }}", "", "{{ item.adjudication[0].value | default: '' }}"] },
+          { "STC": ["{{ status_category }}:{{ status_code }}", "{{ process_date | default: full_date }}", "", "{{ svc_charged }}"] },
+
+          {% comment %} Service Line Date {% endcomment %}
+          {% if claim.item %}
+            {% for claim_item in claim.item %}
+              {% if claim_item.sequence == item_seq and claim_item.servicedDate %}
+          { "DTP": ["472", "D8", "{{ claim_item.servicedDate | replace: '-', '' }}"] },
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+
+          {% comment %} Line item reference numbers {% endcomment %}
+          {% if item.detail %}
+            {% for detail in item.detail %}
+              {% if detail.noteNumber %}
+          { "REF": ["FJ", "{{ detail.noteNumber[0] | default: '' }}"] },
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+        {% endfor %}
+        {% endif %}
+
+        { "SE": ["{{ msg.entry.size | plus: 16 }}", "{{ control_number }}"] },
+        { "GE": ["1", "{{ control_number }}"] },
+        { "IEA": ["1", "{{ control_number }}"] }
+    ]
+}

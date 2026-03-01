@@ -9,6 +9,7 @@ using System.IO;
 using System.Linq;
 using Microsoft.Health.Fhir.Liquid.Converter.Models;
 using Microsoft.Health.Fhir.Liquid.Converter.Models.Hl7v2;
+using Microsoft.Health.Fhir.Liquid.Converter.Models.X12;
 using Microsoft.Health.Fhir.Liquid.Converter.Processors;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -281,6 +282,44 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.FunctionalTests
                 Path.Join(Constants.SampleDataDirectory, "Stu3", item + ".json"),
                 Path.Join(Constants.ExpectedDataFolder, "Stu3ToR4", item + ".json"),
             });
+        }
+
+        public static IEnumerable<object[]> GetDataForX12()
+        {
+            var data = new List<string[]>
+            {
+                new[] { @"X12_270", @"X12-270-01.x12" },
+                new[] { @"X12_270", @"X12-270-02.x12" },
+                new[] { @"X12_271", @"X12-271-01.x12" },
+                new[] { @"X12_271", @"X12-271-02.x12" },
+                new[] { @"X12_275", @"X12-275-01.x12" },
+                new[] { @"X12_275", @"X12-275-02.x12" },
+                new[] { @"X12_276", @"X12-276-01.x12" },
+                new[] { @"X12_276", @"X12-276-02.x12" },
+                new[] { @"X12_277", @"X12-277-01.x12" },
+                new[] { @"X12_277", @"X12-277-02.x12" },
+                new[] { @"X12_278", @"X12-278-01.x12" },
+                new[] { @"X12_278", @"X12-278-02.x12" },
+            };
+            return data.Select(item => new[]
+            {
+                item[0],
+                Path.Join(Constants.SampleDataDirectory, "X12", item[1]),
+            });
+        }
+
+        protected void ConvertX12MessageAndValidateResponse(ITemplateProvider templateProvider, string rootTemplate, string inputFile)
+        {
+            var x12Processor = new X12Processor(_processorSettings, FhirConverterLogging.CreateLogger<X12Processor>());
+            var inputContent = File.ReadAllText(inputFile);
+            var traceInfo = new X12TraceInfo();
+            var actualContent = x12Processor.Convert(inputContent, rootTemplate, templateProvider, traceInfo);
+
+            // Validate that the output is valid JSON and has required FHIR Bundle structure
+            var actualObject = JObject.Parse(actualContent);
+            Assert.Equal("Bundle", actualObject["resourceType"]?.ToString());
+            Assert.NotNull(actualObject["entry"]);
+            Assert.True(traceInfo.UnusedSegments.Count > 0);
         }
 
         protected void ConvertHl7v2MessageAndValidateExpectedResponse(ITemplateProvider templateProvider, string rootTemplate, string inputFile, string expectedFile)

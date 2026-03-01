@@ -1,0 +1,183 @@
+{% comment %}
+  FHIR DocumentReference Bundle to X12 275 (Patient Information Transaction)
+
+  Expected input (msg): A FHIR Bundle containing:
+    - DocumentReference (primary resource - the clinical document/attachment)
+    - Patient (the subject of the document)
+    - Organization (payer)
+    - Organization or Practitioner (provider / submitter)
+    - Claim or CoverageEligibilityRequest (for context/trace number)
+{% endcomment %}
+
+{% comment %} Extract resources from the Bundle {% endcomment %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "DocumentReference" %}
+    {% assign documentRef = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Patient" %}
+    {% assign patient = entry.resource %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Claim" %}
+    {% assign claim = entry.resource %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} Find provider and payer organizations {% endcomment %}
+{% assign provider_found = false %}
+{% assign payer_found = false %}
+{% for entry in msg.entry %}
+  {% if entry.resource.resourceType == "Organization" %}
+    {% if provider_found == false %}
+      {% assign provider = entry.resource %}
+      {% assign provider_found = true %}
+    {% else %}
+      {% if payer_found == false %}
+        {% assign payer = entry.resource %}
+        {% assign payer_found = true %}
+      {% endif %}
+    {% endif %}
+  {% endif %}
+  {% if entry.resource.resourceType == "Practitioner" %}
+    {% assign practitioner = entry.resource %}
+  {% endif %}
+{% endfor %}
+
+{% comment %} If we have a documentRef with context, try to identify payer vs provider {% endcomment %}
+{% if documentRef.context %}
+  {% for entry in msg.entry %}
+    {% if entry.resource.resourceType == "Organization" %}
+      {% for related in documentRef.context.related %}
+        {% if related.reference contains entry.resource.id %}
+          {% assign payer = entry.resource %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+  {% endfor %}
+{% endif %}
+
+{% comment %} Date/Time {% endcomment %}
+{% assign now_date = "now" | now: "yyMMdd" %}
+{% assign now_time = "now" | now: "HHmm" %}
+{% assign full_date = "now" | now: "yyyyMMdd" %}
+
+{% comment %} Identifiers {% endcomment %}
+{% if provider %}
+  {% assign provider_id = provider.identifier[0].value | default: "SENDER" %}
+  {% assign provider_name = provider.name | default: "" %}
+{% elsif practitioner %}
+  {% assign provider_id = practitioner.identifier[0].value | default: "SENDER" %}
+  {% assign provider_name = practitioner.name[0].family | default: "" %}
+{% else %}
+  {% assign provider_id = "SENDER" %}
+  {% assign provider_name = "" %}
+{% endif %}
+
+{% if payer %}
+  {% assign payer_id = payer.identifier[0].value | default: "RECEIVER" %}
+{% else %}
+  {% assign payer_id = "RECEIVER" %}
+{% endif %}
+
+{% comment %} Patient details {% endcomment %}
+{% assign patient_last = patient.name[0].family | default: "" %}
+{% assign patient_first = patient.name[0].given[0] | default: "" %}
+{% assign patient_id = patient.identifier[0].value | default: "" %}
+
+{% comment %} Control number {% endcomment %}
+{% assign control_number = documentRef.id | default: "000000001" | truncate: 9, "" %}
+
+{% comment %} Document details {% endcomment %}
+{% assign doc_date = documentRef.date | replace: "-", "" | truncate: 8, "" %}
+{% assign doc_type = documentRef.type.coding[0].code | default: "11" %}
+{% assign doc_category = documentRef.category[0].coding[0].code | default: "OZ" %}
+
+{% comment %} Attachment details {% endcomment %}
+{% assign attachment = documentRef.content[0].attachment %}
+{% assign content_type = attachment.contentType | default: "text/plain" %}
+{% assign attach_data = attachment.data | default: "" %}
+{% assign attach_url = attachment.url | default: "" %}
+{% assign attach_title = attachment.title | default: "" %}
+
+{% comment %} Map content type to X12 report type {% endcomment %}
+{% if content_type contains "pdf" %}
+  {% assign report_type = "B4" %}
+{% elsif content_type contains "xml" %}
+  {% assign report_type = "B5" %}
+{% elsif content_type contains "image" %}
+  {% assign report_type = "B3" %}
+{% else %}
+  {% assign report_type = "B4" %}
+{% endif %}
+
+{% comment %} Trace/reference number from the claim if available {% endcomment %}
+{% if claim %}
+  {% assign trace_number = claim.identifier[0].value | default: control_number %}
+{% else %}
+  {% assign trace_number = control_number %}
+{% endif %}
+
+{
+    "delimiters": {
+        "elementSeparator": "*",
+        "subElementSeparator": ":",
+        "segmentTerminator": "~"
+    },
+    "x12Definition": [
+        { "ISA": ["00", "          ", "00", "          ", "ZZ", "{{ provider_id }}{% assign pad_len = 15 | minus: provider_id.size %}{% for i in (1..pad_len) %} {% endfor %}", "ZZ", "{{ payer_id }}{% assign pad_len2 = 15 | minus: payer_id.size %}{% for i in (1..pad_len2) %} {% endfor %}", "{{ now_date }}", "{{ now_time }}", "^", "00501", "{{ control_number }}", "0", "P", ":"] },
+        { "GS": ["HI", "{{ provider_id }}", "{{ payer_id }}", "{{ full_date }}", "{{ now_time }}", "{{ control_number }}", "X", "005010X210"] },
+        { "ST": ["275", "{{ control_number }}", "005010X210"] },
+
+        { "BGN": ["02", "{{ control_number }}", "{{ doc_date | default: full_date }}"] },
+
+        { "TRN": ["2", "{{ trace_number }}"] },
+
+        {% comment %} 2000A - Payer {% endcomment %}
+        { "NM1": ["PR", "2", "{{ payer.name | default: '' }}", "", "", "", "", "PI", "{{ payer_id }}"] },
+
+        {% comment %} 2000B - Provider/Submitter {% endcomment %}
+        {% if practitioner %}
+        { "NM1": ["1P", "1", "{{ practitioner.name[0].family | default: '' }}", "{{ practitioner.name[0].given[0] | default: '' }}", "", "", "", "XX", "{{ provider_id }}"] },
+        {% else %}
+        { "NM1": ["1P", "2", "{{ provider_name }}", "", "", "", "", "XX", "{{ provider_id }}"] },
+        {% endif %}
+
+        {% comment %} 2000C - Patient/Subscriber {% endcomment %}
+        { "NM1": ["IL", "1", "{{ patient_last }}", "{{ patient_first }}", "", "", "", "MI", "{{ patient_id }}"] },
+
+        {% comment %} Patient Reference Identification {% endcomment %}
+        {% if patient.identifier[0] %}
+        { "REF": ["EJ", "{{ patient.identifier[0].value | default: '' }}"] },
+        {% endif %}
+
+        {% comment %} Service Date {% endcomment %}
+        { "DTP": ["472", "D8", "{{ doc_date | default: full_date }}"] },
+
+        {% comment %} 2000D - Line Item Information {% endcomment %}
+        { "LX": ["1"] },
+
+        {% comment %} Category of patient information {% endcomment %}
+        { "CAT": ["{{ doc_category }}", "TX"] },
+
+        {% comment %} Additional patient information - document content {% endcomment %}
+        {% for content in documentRef.content %}
+          {% assign att = content.attachment %}
+          {% if att.data %}
+            { "EFI": ["05", "", "", "", "", "{{ att.title | default: '' }}"] },
+            { "BIN": ["{{ att.data.size }}", "{{ att.data }}"] },
+          {% elsif att.url %}
+            { "EFI": ["06", "", "", "", "{{ att.url }}"] },
+          {% else %}
+            { "EFI": ["05"] },
+          {% endif %}
+        {% endfor %}
+
+        {% comment %} Document description {% endcomment %}
+        {% if documentRef.description %}
+        { "MSG": ["{{ documentRef.description }}"] },
+        {% endif %}
+
+        { "SE": ["{{ msg.entry.size | plus: 10 }}", "{{ control_number }}"] },
+        { "GE": ["1", "{{ control_number }}"] },
+        { "IEA": ["1", "{{ control_number }}"] }
+    ]
+}

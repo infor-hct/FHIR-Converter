@@ -31,6 +31,8 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.UnitTests.Processors
             yield return new object[] { DataType.Hl7v2, ConvertDataOutputFormat.Fhir, typeof(Hl7v2Processor) };
             yield return new object[] { DataType.Json, ConvertDataOutputFormat.Fhir, typeof(JsonProcessor) };
             yield return new object[] { DataType.Fhir, ConvertDataOutputFormat.Hl7v2, typeof(JsonToHl7v2Processor) };
+            yield return new object[] { DataType.X12, ConvertDataOutputFormat.Fhir, typeof(X12Processor) };
+            yield return new object[] { DataType.Fhir, ConvertDataOutputFormat.X12, typeof(FhirToX12Processor) };
         }
 
         [Theory]

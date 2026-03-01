@@ -30,6 +30,9 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.Models
         // This could be the inner exception of RenderException because it is used in filters
         InvalidHexadecimalNumber = 1207,
 
+        // X12 DataParseException
+        InvalidX12Message = 1208,
+
         // RenderException
         TemplateRenderingError = 1301,
         PropertyNotFound = 1302,

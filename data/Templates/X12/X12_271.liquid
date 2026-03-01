@@ -1,0 +1,792 @@
+{% comment %}
+X12 271 Health Care Eligibility Benefit Response -> FHIR R4 Bundle
+Converts X12 271 transaction to a FHIR R4 Bundle containing:
+  - CoverageEligibilityResponse
+  - Patient (subscriber and/or dependent)
+  - Organization (insurer / information source)
+  - Organization (provider / information receiver)
+  - Practitioner (if present)
+  - Coverage
+{% endcomment -%}
+
+{% comment %} ---- Extract header segments ---- {% endcomment -%}
+{% assign firstSegments = x12Data | get_first_x12_segments: 'ISA|GS|ST|BHT|SE|GE|IEA' -%}
+
+{% comment %} ---- Collect all HL, NM1, REF, DTP, EB, MSG segments ---- {% endcomment -%}
+{% assign hlSegments = x12Data | get_x12_segments_by_type: 'HL' -%}
+{% assign nm1Segments = x12Data | get_x12_segments_by_type: 'NM1' -%}
+{% assign refSegments = x12Data | get_x12_segments_by_type: 'REF' -%}
+{% assign dtpSegments = x12Data | get_x12_segments_by_type: 'DTP' -%}
+{% assign ebSegments = x12Data | get_x12_segments_by_type: 'EB' -%}
+{% assign msgSegments = x12Data | get_x12_segments_by_type: 'MSG' -%}
+
+{% comment %} ---- Split by HL loops to process hierarchy ---- {% endcomment -%}
+{% assign hlLoops = x12Data | split_x12_by_hl_loop -%}
+
+{% comment %} ---- Identify HL loops by level code (HL03) ---- {% endcomment -%}
+{% comment %}
+  HL03 = 20 -> Information Source (Payer/Insurer)
+  HL03 = 21 -> Information Receiver (Provider)
+  HL03 = 22 -> Subscriber
+  HL03 = 23 -> Dependent
+{% endcomment -%}
+
+{% comment %} ---- Walk through HL loops and extract entities ---- {% endcomment -%}
+{% for loop in hlLoops -%}
+    {% assign loopFirsts = loop | get_first_x12_segments: 'HL|NM1|N3|N4|REF|DMG|INS|DTP' -%}
+    {% assign loopHL = loopFirsts.HL -%}
+
+    {% if loopHL -%}
+        {% assign hlLevelCode = loopHL.Elements[3].Value -%}
+
+        {% comment %} ---- Information Source (Payer) HL03=20 ---- {% endcomment -%}
+        {% if hlLevelCode == "20" -%}
+            {% assign payerNM1 = loopFirsts.NM1 -%}
+            {% assign payerN3 = loopFirsts.N3 -%}
+            {% assign payerN4 = loopFirsts.N4 -%}
+            {% assign payerREF = loopFirsts.REF -%}
+        {% endif -%}
+
+        {% comment %} ---- Information Receiver (Provider) HL03=21 ---- {% endcomment -%}
+        {% if hlLevelCode == "21" -%}
+            {% assign providerNM1 = loopFirsts.NM1 -%}
+            {% assign providerN3 = loopFirsts.N3 -%}
+            {% assign providerN4 = loopFirsts.N4 -%}
+            {% assign providerREF = loopFirsts.REF -%}
+        {% endif -%}
+
+        {% comment %} ---- Subscriber HL03=22 ---- {% endcomment -%}
+        {% if hlLevelCode == "22" -%}
+            {% assign subscriberNM1 = loopFirsts.NM1 -%}
+            {% assign subscriberN3 = loopFirsts.N3 -%}
+            {% assign subscriberN4 = loopFirsts.N4 -%}
+            {% assign subscriberDMG = loopFirsts.DMG -%}
+            {% assign subscriberREF = loopFirsts.REF -%}
+            {% assign subscriberINS = loopFirsts.INS -%}
+            {% assign subscriberDTP = loopFirsts.DTP -%}
+            {% assign subscriberEBSegments = loop | get_x12_segments_by_type: 'EB' -%}
+            {% assign subscriberMSGSegments = loop | get_x12_segments_by_type: 'MSG' -%}
+            {% assign subscriberDTPSegments = loop | get_x12_segments_by_type: 'DTP' -%}
+            {% assign subscriberREFSegments = loop | get_x12_segments_by_type: 'REF' -%}
+            {% assign hasSubscriber = true -%}
+        {% endif -%}
+
+        {% comment %} ---- Dependent HL03=23 ---- {% endcomment -%}
+        {% if hlLevelCode == "23" -%}
+            {% assign dependentNM1 = loopFirsts.NM1 -%}
+            {% assign dependentN3 = loopFirsts.N3 -%}
+            {% assign dependentN4 = loopFirsts.N4 -%}
+            {% assign dependentDMG = loopFirsts.DMG -%}
+            {% assign dependentREF = loopFirsts.REF -%}
+            {% assign dependentINS = loopFirsts.INS -%}
+            {% assign dependentDTP = loopFirsts.DTP -%}
+            {% assign dependentEBSegments = loop | get_x12_segments_by_type: 'EB' -%}
+            {% assign dependentMSGSegments = loop | get_x12_segments_by_type: 'MSG' -%}
+            {% assign dependentDTPSegments = loop | get_x12_segments_by_type: 'DTP' -%}
+            {% assign dependentREFSegments = loop | get_x12_segments_by_type: 'REF' -%}
+            {% assign hasDependent = true -%}
+        {% endif -%}
+    {% endif -%}
+{% endfor -%}
+
+{% comment %} ---- Determine which patient is the beneficiary ---- {% endcomment -%}
+{% if hasDependent -%}
+    {% assign beneficiaryNM1 = dependentNM1 -%}
+    {% assign beneficiaryN3 = dependentN3 -%}
+    {% assign beneficiaryN4 = dependentN4 -%}
+    {% assign beneficiaryDMG = dependentDMG -%}
+    {% assign activeEBSegments = dependentEBSegments -%}
+    {% assign activeMSGSegments = dependentMSGSegments -%}
+    {% assign activeDTPSegments = dependentDTPSegments -%}
+    {% assign activeREFSegments = dependentREFSegments -%}
+{% else -%}
+    {% assign beneficiaryNM1 = subscriberNM1 -%}
+    {% assign beneficiaryN3 = subscriberN3 -%}
+    {% assign beneficiaryN4 = subscriberN4 -%}
+    {% assign beneficiaryDMG = subscriberDMG -%}
+    {% assign activeEBSegments = subscriberEBSegments -%}
+    {% assign activeMSGSegments = subscriberMSGSegments -%}
+    {% assign activeDTPSegments = subscriberDTPSegments -%}
+    {% assign activeREFSegments = subscriberREFSegments -%}
+{% endif -%}
+
+{% comment %} ---- Generate deterministic resource IDs ---- {% endcomment -%}
+{% assign bundleIdInput = firstSegments.ST.Elements[2].Value | append: '-271-Bundle' -%}
+{% assign bundleId = bundleIdInput | generate_uuid -%}
+
+{% assign cerIdInput = firstSegments.ST.Elements[2].Value | append: '-271-CoverageEligibilityResponse' -%}
+{% assign cerId = cerIdInput | generate_uuid -%}
+
+{% assign patientIdInput = beneficiaryNM1.Elements[9].Value | append: '-Patient' -%}
+{% assign patientId = patientIdInput | generate_uuid -%}
+
+{% assign insurerIdInput = payerNM1.Elements[9].Value | append: '-Organization-Insurer' -%}
+{% assign insurerId = insurerIdInput | generate_uuid -%}
+
+{% assign providerIdInput = providerNM1.Elements[9].Value | append: '-Organization-Provider' -%}
+{% assign providerOrgId = providerIdInput | generate_uuid -%}
+
+{% assign coverageIdInput = firstSegments.ST.Elements[2].Value | append: '-Coverage' -%}
+{% assign coverageId = coverageIdInput | generate_uuid -%}
+
+{% comment %} ---- Generate subscriber patient ID if different from beneficiary ---- {% endcomment -%}
+{% if hasDependent and hasSubscriber -%}
+    {% assign subscriberPatientIdInput = subscriberNM1.Elements[9].Value | append: '-Patient-Subscriber' -%}
+    {% assign subscriberPatientId = subscriberPatientIdInput | generate_uuid -%}
+{% endif -%}
+
+{% comment %} ---- Check for practitioner in provider loop ---- {% endcomment -%}
+{% assign hasPractitioner = false -%}
+{% if providerNM1 -%}
+    {% if providerNM1.Elements[1].Value == "82" or providerNM1.Elements[1].Value == "71" or providerNM1.Elements[1].Value == "72" -%}
+        {% assign hasPractitioner = true -%}
+        {% assign practitionerIdInput = providerNM1.Elements[9].Value | append: '-Practitioner' -%}
+        {% assign practitionerId = practitionerIdInput | generate_uuid -%}
+    {% endif -%}
+{% endif -%}
+
+{% comment %} ---- Begin FHIR Bundle output ---- {% endcomment -%}
+{
+    "resourceType": "Bundle",
+    "type": "batch",
+    "id": "{{ bundleId }}",
+    {% if firstSegments.GS -%}
+        "timestamp": "{{ firstSegments.GS.Elements[4].Value | date: "%Y-%m-%d" }}T00:00:00Z",
+    {% endif -%}
+    "identifier": {
+        "value": "{{ firstSegments.ST.Elements[2].Value }}"
+    },
+    "entry": [
+        {% comment %} ==== CoverageEligibilityResponse Resource ==== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ cerId }}",
+            "resource": {
+                "resourceType": "CoverageEligibilityResponse",
+                "id": "{{ cerId }}",
+                "status": "active",
+                "purpose": [
+                    "benefits"
+                ],
+                {% comment %} ---- Map BHT06 to outcome ---- {% endcomment -%}
+                "outcome": "complete",
+                {% comment %} ---- Created date from GS04 ---- {% endcomment -%}
+                {% if firstSegments.GS -%}
+                    {% assign gsDate = firstSegments.GS.Elements[4].Value -%}
+                    {% if gsDate.size == 8 -%}
+                        "created": "{{ gsDate | slice: 0, 4 }}-{{ gsDate | slice: 4, 2 }}-{{ gsDate | slice: 6, 2 }}",
+                    {% else -%}
+                        "created": "{{ gsDate }}",
+                    {% endif -%}
+                {% endif -%}
+                "patient": {
+                    "reference": "Patient/{{ patientId }}"
+                },
+                "insurer": {
+                    "reference": "Organization/{{ insurerId }}"
+                },
+                "request": {
+                    "reference": "CoverageEligibilityRequest/unknown"
+                },
+                {% if hasPractitioner -%}
+                    "requestor": {
+                        "reference": "Practitioner/{{ practitionerId }}"
+                    },
+                {% else -%}
+                    "requestor": {
+                        "reference": "Organization/{{ providerOrgId }}"
+                    },
+                {% endif -%}
+                {% comment %} ---- Disposition from MSG segments ---- {% endcomment -%}
+                {% if activeMSGSegments.size > 0 -%}
+                    "disposition": "{% for msgSeg in activeMSGSegments %}{{ msgSeg.Elements[1].Value }}{% unless forloop.last %} {% endunless %}{% endfor %}",
+                {% endif -%}
+                "insurance": [
+                    {
+                        "coverage": {
+                            "reference": "Coverage/{{ coverageId }}"
+                        },
+                        "inforce": true,
+                        "item": [
+                            {% comment %} ---- Map each EB segment to an item ---- {% endcomment -%}
+                            {% for ebSeg in activeEBSegments -%}
+                                {% comment %}
+                                    EB01 = Eligibility/Benefit Information Code
+                                    EB02 = Coverage Level Code
+                                    EB03 = Service Type Code
+                                    EB04 = Insurance Type Code
+                                    EB05 = Plan Coverage Description
+                                    EB06 = Time Period Qualifier
+                                    EB07 = Monetary Amount
+                                    EB08 = Percent
+                                {% endcomment -%}
+                                {
+                                    {% comment %} ---- Category from EB01 ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[1].Value != "" and ebSeg.Elements[1].Value != nil -%}
+                                        "category": {
+                                            "coding": [
+                                                {
+                                                    "system": "https://x12.org/codes/eligibility-or-benefit-information-code",
+                                                    "code": "{{ ebSeg.Elements[1].Value }}",
+                                                    "display": "{% case ebSeg.Elements[1].Value %}{% when '1' %}Active Coverage{% when '2' %}Active - Full Risk Capitation{% when '3' %}Active - Services Capitated{% when '4' %}Active - Services Capitated to Primary Care Physician{% when '5' %}Active - Pending Investigation{% when '6' %}Active - Under Utilization Review{% when '7' %}Active - Services Capitated to Primary Care Physician - Managed Care{% when '8' %}Inactive{% when 'A' %}Co-Insurance{% when 'B' %}Co-Payment{% when 'C' %}Deductible{% when 'CB' %}Coverage Basis{% when 'D' %}Benefit Description{% when 'E' %}Exclusions{% when 'F' %}Limitations{% when 'G' %}Out of Pocket (Stop Loss){% when 'H' %}Unlimited{% when 'I' %}Non-Covered{% when 'J' %}Cost Containment{% when 'K' %}Reserve{% when 'L' %}Primary Care Provider{% when 'M' %}Pre-existing Condition{% when 'MC' %}Managed Care Coordinator{% when 'N' %}Services Restricted to Following Provider{% when 'O' %}Not Deemed a Medical Necessity{% when 'P' %}Benefit Disclaimer{% when 'Q' %}Second Surgical Opinion Required{% when 'R' %}Other or Additional Payor{% when 'S' %}Prior Year(s) History{% when 'T' %}Card(s) Reported Lost/Stolen{% when 'U' %}Contact Following Entity for Eligibility or Benefit Information{% when 'V' %}Cannot Process{% when 'W' %}Other Source of Data{% when 'X' %}Health Care Facility{% when 'Y' %}Spend Down{% endcase %}"
+                                                }
+                                            ]
+                                        },
+                                    {% endif -%}
+                                    {% comment %} ---- Service type from EB03 mapped to FHIR benefit type ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[3].Value != "" and ebSeg.Elements[3].Value != nil -%}
+                                        "productOrService": {
+                                            "coding": [
+                                                {
+                                                    "system": "https://x12.org/codes/service-type-code",
+                                                    "code": "{{ ebSeg.Elements[3].Value }}",
+                                                    "display": "{% case ebSeg.Elements[3].Value %}{% when '1' %}Medical Care{% when '2' %}Surgical{% when '3' %}Consultation{% when '4' %}Diagnostic X-Ray{% when '5' %}Diagnostic Lab{% when '6' %}Radiation Therapy{% when '7' %}Anesthesia{% when '8' %}Surgical Assistance{% when '12' %}Durable Medical Equipment Purchase{% when '14' %}Renal Supplies in the Home{% when '15' %}Alternate Method Dialysis{% when '17' %}Pre-Admission Testing{% when '18' %}Durable Medical Equipment Rental{% when '20' %}Second Surgical Opinion{% when '22' %}Social Work{% when '23' %}Speech Therapy{% when '24' %}Diagnostic Dental{% when '25' %}Periodontics{% when '26' %}Prosthodontics{% when '27' %}Crowns{% when '28' %}Dental Accident{% when '30' %}Health Benefit Plan Coverage{% when '32' %}Plan Waiting Period{% when '33' %}Chiropractic{% when '34' %}Chiropractic Office Visits{% when '35' %}Dental Care{% when '36' %}Dental Crowns{% when '37' %}Dental Accident{% when '38' %}Orthodontics{% when '39' %}Prosthodontics{% when '40' %}Orthodontics{% when '41' %}Routine Preventive Dental{% when '42' %}Home Health Care{% when '43' %}Home Health Prescriptions{% when '44' %}Home Health Visits{% when '45' %}Hospice{% when '46' %}Respite Care{% when '47' %}Hospital{% when '48' %}Hospital - Inpatient{% when '49' %}Hospital - Room and Board{% when '50' %}Hospital - Outpatient{% when '51' %}Hospital - Emergency Accident{% when '52' %}Hospital - Emergency Medical{% when '53' %}Hospital - Ambulatory Surgical{% when '54' %}Long Term Care{% when '55' %}Major Medical{% when '56' %}Medically Related Transportation{% when '57' %}Air Transportation{% when '58' %}Cabulance{% when '59' %}Licensed Ambulance{% when '60' %}General Benefits{% when '61' %}In-vitro Fertilization{% when '62' %}MRI/CAT Scan{% when '63' %}Donor Procedures{% when '64' %}Acupuncture{% when '65' %}Newborn Care{% when '66' %}Pathology{% when '67' %}Smoking Cessation{% when '68' %}Well Baby Care{% when '69' %}Maternity{% when '70' %}Transplants{% when '71' %}Audiology Exam{% when '72' %}Inhalation Therapy{% when '73' %}Diagnostic Medical{% when '74' %}Private Duty Nursing{% when '75' %}Prosthetic Device{% when '76' %}Dialysis{% when '77' %}Otological Exam{% when '78' %}Chemotherapy{% when '79' %}Allergy Testing{% when '80' %}Immunizations{% when '81' %}Routine Physical{% when '82' %}Family Planning{% when '83' %}Infertility{% when '84' %}Abortion{% when '85' %}AIDS{% when '86' %}Emergency Services{% when '87' %}Cancer{% when '88' %}Pharmacy{% when '89' %}Free Standing Prescription Drug{% when '90' %}Mail Order Prescription Drug{% when '91' %}Brand Name Prescription Drug{% when '92' %}Generic Prescription Drug{% when '93' %}Podiatry{% when '94' %}Podiatry - Office Visits{% when '95' %}Podiatry - Nursing Home Visits{% when '96' %}Professional (Physician){% when '97' %}Anesthesiologist{% when '98' %}Professional (Physician) Visit - Office{% when '99' %}Professional (Physician) Visit - Inpatient{% when 'AL' %}Vision (Optometry){% when 'MH' %}Mental Health{% when 'UC' %}Urgent Care{% endcase %}"
+                                                }
+                                            ]
+                                        },
+                                    {% endif -%}
+                                    {% comment %} ---- Network indicator from EB12 ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[12].Value != "" and ebSeg.Elements[12].Value != nil -%}
+                                        "network": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/benefit-network",
+                                                    "code": "{% if ebSeg.Elements[12].Value == 'Y' %}in{% else %}out{% endif %}",
+                                                    "display": "{% if ebSeg.Elements[12].Value == 'Y' %}In Network{% else %}Out of Network{% endif %}"
+                                                }
+                                            ]
+                                        },
+                                    {% endif -%}
+                                    {% comment %} ---- Unit (coverage level) from EB02 ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[2].Value != "" and ebSeg.Elements[2].Value != nil -%}
+                                        "unit": {
+                                            "coding": [
+                                                {
+                                                    "system": "https://x12.org/codes/coverage-level-code",
+                                                    "code": "{{ ebSeg.Elements[2].Value }}",
+                                                    "display": "{% case ebSeg.Elements[2].Value %}{% when 'CHD' %}Children Only{% when 'DEP' %}Dependents Only{% when 'ECH' %}Employee and Children{% when 'EMP' %}Employee Only{% when 'ESP' %}Employee and Spouse{% when 'FAM' %}Family{% when 'IND' %}Individual{% when 'SPC' %}Spouse and Children{% when 'SPO' %}Spouse Only{% endcase %}"
+                                                }
+                                            ]
+                                        },
+                                    {% endif -%}
+                                    {% comment %} ---- Term (time period qualifier) from EB06 ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[6].Value != "" and ebSeg.Elements[6].Value != nil -%}
+                                        "term": {
+                                            "coding": [
+                                                {
+                                                    "system": "https://x12.org/codes/time-period-qualifier",
+                                                    "code": "{{ ebSeg.Elements[6].Value }}",
+                                                    "display": "{% case ebSeg.Elements[6].Value %}{% when '6' %}Hour{% when '7' %}Day{% when '13' %}24 Hours{% when '21' %}Years{% when '22' %}Service Year{% when '23' %}Calendar Year{% when '24' %}Year to Date{% when '25' %}Contract{% when '26' %}Episode{% when '27' %}Visit{% when '28' %}Outlier{% when '29' %}Remaining{% when '30' %}Exceeded{% when '31' %}Not Exceeded{% when '32' %}Lifetime{% when '33' %}Lifetime Remaining{% when '34' %}Month{% when '35' %}Week{% when '36' %}Admission{% endcase %}"
+                                                }
+                                            ]
+                                        },
+                                    {% endif -%}
+                                    {% comment %} ---- Plan description from EB05 ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[5].Value != "" and ebSeg.Elements[5].Value != nil -%}
+                                        "description": "{{ ebSeg.Elements[5].Value }}",
+                                    {% endif -%}
+                                    {% comment %} ---- Insurance type from EB04 ---- {% endcomment -%}
+                                    {% if ebSeg.Elements[4].Value != "" and ebSeg.Elements[4].Value != nil -%}
+                                        "modifier": [
+                                            {
+                                                "coding": [
+                                                    {
+                                                        "system": "https://x12.org/codes/insurance-type-code",
+                                                        "code": "{{ ebSeg.Elements[4].Value }}",
+                                                        "display": "{% case ebSeg.Elements[4].Value %}{% when 'AP' %}Auto Insurance Policy{% when 'C1' %}Commercial{% when 'CO' %}Consolidated Omnibus Budget Reconciliation Act (COBRA){% when 'CP' %}Medicare Conditionally{% when 'DB' %}Disability Benefits{% when 'EP' %}Exclusive Provider Organization{% when 'FF' %}Federal Employees Program{% when 'GP' %}Group Policy{% when 'HM' %}Health Maintenance Organization (HMO){% when 'HN' %}Health Maintenance Organization (HMO) - Medicare Risk{% when 'HS' %}Special Low Income Medicare Beneficiary{% when 'IN' %}Indemnity{% when 'IP' %}Individual Policy{% when 'LC' %}Long Term Care{% when 'LD' %}Long Term Policy{% when 'LT' %}Litigation{% when 'MA' %}Medicare Part A{% when 'MB' %}Medicare Part B{% when 'MC' %}Medicaid{% when 'MH' %}Medigap Part A{% when 'MI' %}Medigap Part B{% when 'MP' %}Medicare Primary{% when 'OT' %}Other{% when 'PE' %}Property Insurance - Personal{% when 'PL' %}Personal{% when 'PP' %}Preferred Provider Organization (PPO){% when 'PR' %}Preferred Provider Organization (PPO) - Medicare{% when 'PS' %}Point of Service (POS){% when 'QM' %}Qualified Medicare Beneficiary{% when 'RP' %}Property Insurance - Real{% when 'SP' %}Supplemental Policy{% when 'TF' %}Tax Equity Fiscal Responsibility Act (TEFRA){% when 'WC' %}Workers Compensation{% when 'WU' %}Wrap Up Policy{% endcase %}"
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                    {% endif -%}
+                                    {% comment %} ---- Benefit: monetary amount from EB07 and percent from EB08 ---- {% endcomment -%}
+                                    "benefit": [
+                                        {% if ebSeg.Elements[7].Value != "" and ebSeg.Elements[7].Value != nil -%}
+                                            {
+                                                "type": {
+                                                    "coding": [
+                                                        {
+                                                            "system": "http://terminology.hl7.org/CodeSystem/benefit-type",
+                                                            "code": "benefit"
+                                                        }
+                                                    ]
+                                                },
+                                                "allowedMoney": {
+                                                    "value": {{ ebSeg.Elements[7].Value }},
+                                                    "currency": "USD"
+                                                }
+                                            }{% if ebSeg.Elements[8].Value != "" and ebSeg.Elements[8].Value != nil %},{% endif %}
+                                        {% endif -%}
+                                        {% if ebSeg.Elements[8].Value != "" and ebSeg.Elements[8].Value != nil -%}
+                                            {
+                                                "type": {
+                                                    "coding": [
+                                                        {
+                                                            "system": "http://terminology.hl7.org/CodeSystem/benefit-type",
+                                                            "code": "copay-percent"
+                                                        }
+                                                    ]
+                                                },
+                                                "allowedUnsignedInt": {{ ebSeg.Elements[8].Value | times: 100 | round: 0 }}
+                                            }
+                                        {% endif -%}
+                                    ]
+                                }{% unless forloop.last %},{% endunless %}
+                            {% endfor -%}
+                        ]
+                    }
+                ]
+            },
+            "request": {
+                "method": "PUT",
+                "url": "CoverageEligibilityResponse/{{ cerId }}"
+            }
+        },
+        {% comment %} ==== Patient Resource (Beneficiary) ==== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ patientId }}",
+            "resource": {
+                "resourceType": "Patient",
+                "id": "{{ patientId }}",
+                {% if beneficiaryNM1 -%}
+                    {% comment %} NM108/NM109 = ID type qualifier / ID {% endcomment -%}
+                    {% if beneficiaryNM1.Elements[9].Value != "" and beneficiaryNM1.Elements[9].Value != nil -%}
+                        "identifier": [
+                            {
+                                {% if beneficiaryNM1.Elements[8].Value == "MI" -%}
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                "code": "MI",
+                                                "display": "Member Number"
+                                            }
+                                        ]
+                                    },
+                                {% elsif beneficiaryNM1.Elements[8].Value == "34" -%}
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                "code": "SS",
+                                                "display": "Social Security Number"
+                                            }
+                                        ]
+                                    },
+                                {% endif -%}
+                                "system": "https://x12.org/codes/identification-code-qualifier/{{ beneficiaryNM1.Elements[8].Value }}",
+                                "value": "{{ beneficiaryNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    {% comment %} NM103 = Last Name, NM104 = First Name, NM105 = Middle {% endcomment -%}
+                    "name": [
+                        {
+                            "use": "official",
+                            {% if beneficiaryNM1.Elements[3].Value != "" and beneficiaryNM1.Elements[3].Value != nil -%}
+                                "family": "{{ beneficiaryNM1.Elements[3].Value }}",
+                            {% endif -%}
+                            "given": [
+                                {% if beneficiaryNM1.Elements[4].Value != "" and beneficiaryNM1.Elements[4].Value != nil -%}
+                                    "{{ beneficiaryNM1.Elements[4].Value }}"{% if beneficiaryNM1.Elements[5].Value != "" and beneficiaryNM1.Elements[5].Value != nil %},{% endif %}
+                                {% endif -%}
+                                {% if beneficiaryNM1.Elements[5].Value != "" and beneficiaryNM1.Elements[5].Value != nil -%}
+                                    "{{ beneficiaryNM1.Elements[5].Value }}"
+                                {% endif -%}
+                            ]
+                        }
+                    ],
+                {% endif -%}
+                {% comment %} ---- Demographics from DMG segment ---- {% endcomment -%}
+                {% if beneficiaryDMG -%}
+                    {% comment %} DMG01 = Date Format Qualifier, DMG02 = DOB, DMG03 = Gender {% endcomment -%}
+                    {% if beneficiaryDMG.Elements[2].Value != "" and beneficiaryDMG.Elements[2].Value != nil -%}
+                        {% assign dob = beneficiaryDMG.Elements[2].Value -%}
+                        {% if dob.size == 8 -%}
+                            "birthDate": "{{ dob | slice: 0, 4 }}-{{ dob | slice: 4, 2 }}-{{ dob | slice: 6, 2 }}",
+                        {% else -%}
+                            "birthDate": "{{ dob }}",
+                        {% endif -%}
+                    {% endif -%}
+                    {% if beneficiaryDMG.Elements[3].Value != "" and beneficiaryDMG.Elements[3].Value != nil -%}
+                        "gender": "{% case beneficiaryDMG.Elements[3].Value %}{% when 'M' %}male{% when 'F' %}female{% when 'U' %}unknown{% else %}other{% endcase %}",
+                    {% endif -%}
+                {% endif -%}
+                {% comment %} ---- Address from N3/N4 ---- {% endcomment -%}
+                {% if beneficiaryN3 or beneficiaryN4 -%}
+                    "address": [
+                        {
+                            "use": "home",
+                            {% if beneficiaryN3 -%}
+                                "line": [
+                                    "{{ beneficiaryN3.Elements[1].Value }}"{% if beneficiaryN3.Elements[2].Value != "" and beneficiaryN3.Elements[2].Value != nil %},
+                                    "{{ beneficiaryN3.Elements[2].Value }}"{% endif %}
+                                ],
+                            {% endif -%}
+                            {% if beneficiaryN4 -%}
+                                {% if beneficiaryN4.Elements[1].Value != "" and beneficiaryN4.Elements[1].Value != nil -%}
+                                    "city": "{{ beneficiaryN4.Elements[1].Value }}",
+                                {% endif -%}
+                                {% if beneficiaryN4.Elements[2].Value != "" and beneficiaryN4.Elements[2].Value != nil -%}
+                                    "state": "{{ beneficiaryN4.Elements[2].Value }}",
+                                {% endif -%}
+                                {% if beneficiaryN4.Elements[3].Value != "" and beneficiaryN4.Elements[3].Value != nil -%}
+                                    "postalCode": "{{ beneficiaryN4.Elements[3].Value }}",
+                                {% endif -%}
+                            {% endif -%}
+                            "country": "US"
+                        }
+                    ],
+                {% endif -%}
+                "active": true
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Patient/{{ patientId }}"
+            }
+        },
+        {% comment %} ==== Subscriber Patient Resource (if different from beneficiary) ==== {% endcomment -%}
+        {% if hasDependent and hasSubscriber -%}
+            {
+                "fullUrl": "urn:uuid:{{ subscriberPatientId }}",
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "{{ subscriberPatientId }}",
+                    {% if subscriberNM1 -%}
+                        {% if subscriberNM1.Elements[9].Value != "" and subscriberNM1.Elements[9].Value != nil -%}
+                            "identifier": [
+                                {
+                                    {% if subscriberNM1.Elements[8].Value == "MI" -%}
+                                        "type": {
+                                            "coding": [
+                                                {
+                                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                                    "code": "MI",
+                                                    "display": "Member Number"
+                                                }
+                                            ]
+                                        },
+                                    {% endif -%}
+                                    "system": "https://x12.org/codes/identification-code-qualifier/{{ subscriberNM1.Elements[8].Value }}",
+                                    "value": "{{ subscriberNM1.Elements[9].Value }}"
+                                }
+                            ],
+                        {% endif -%}
+                        "name": [
+                            {
+                                "use": "official",
+                                {% if subscriberNM1.Elements[3].Value != "" and subscriberNM1.Elements[3].Value != nil -%}
+                                    "family": "{{ subscriberNM1.Elements[3].Value }}",
+                                {% endif -%}
+                                "given": [
+                                    {% if subscriberNM1.Elements[4].Value != "" and subscriberNM1.Elements[4].Value != nil -%}
+                                        "{{ subscriberNM1.Elements[4].Value }}"
+                                    {% endif -%}
+                                ]
+                            }
+                        ],
+                    {% endif -%}
+                    {% if subscriberDMG -%}
+                        {% if subscriberDMG.Elements[2].Value != "" and subscriberDMG.Elements[2].Value != nil -%}
+                            {% assign subDob = subscriberDMG.Elements[2].Value -%}
+                            {% if subDob.size == 8 -%}
+                                "birthDate": "{{ subDob | slice: 0, 4 }}-{{ subDob | slice: 4, 2 }}-{{ subDob | slice: 6, 2 }}",
+                            {% else -%}
+                                "birthDate": "{{ subDob }}",
+                            {% endif -%}
+                        {% endif -%}
+                        {% if subscriberDMG.Elements[3].Value != "" and subscriberDMG.Elements[3].Value != nil -%}
+                            "gender": "{% case subscriberDMG.Elements[3].Value %}{% when 'M' %}male{% when 'F' %}female{% when 'U' %}unknown{% else %}other{% endcase %}",
+                        {% endif -%}
+                    {% endif -%}
+                    "active": true
+                },
+                "request": {
+                    "method": "PUT",
+                    "url": "Patient/{{ subscriberPatientId }}"
+                }
+            },
+        {% endif -%}
+        {% comment %} ==== Organization Resource (Insurer/Payer) ==== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ insurerId }}",
+            "resource": {
+                "resourceType": "Organization",
+                "id": "{{ insurerId }}",
+                {% if payerNM1 -%}
+                    {% if payerNM1.Elements[9].Value != "" and payerNM1.Elements[9].Value != nil -%}
+                        "identifier": [
+                            {
+                                "system": "https://x12.org/codes/identification-code-qualifier/{{ payerNM1.Elements[8].Value }}",
+                                "value": "{{ payerNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    {% comment %} NM102=1 means entity is a person, NM102=2 means organization {% endcomment -%}
+                    {% if payerNM1.Elements[2].Value == "2" -%}
+                        "name": "{{ payerNM1.Elements[3].Value }}",
+                    {% else -%}
+                        "name": "{{ payerNM1.Elements[3].Value }}, {{ payerNM1.Elements[4].Value }}",
+                    {% endif -%}
+                {% endif -%}
+                "type": [
+                    {
+                        "coding": [
+                            {
+                                "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                                "code": "ins",
+                                "display": "Insurance Company"
+                            }
+                        ]
+                    }
+                ],
+                {% if payerN3 or payerN4 -%}
+                    "address": [
+                        {
+                            {% if payerN3 -%}
+                                "line": [
+                                    "{{ payerN3.Elements[1].Value }}"
+                                ],
+                            {% endif -%}
+                            {% if payerN4 -%}
+                                {% if payerN4.Elements[1].Value != "" and payerN4.Elements[1].Value != nil -%}
+                                    "city": "{{ payerN4.Elements[1].Value }}",
+                                {% endif -%}
+                                {% if payerN4.Elements[2].Value != "" and payerN4.Elements[2].Value != nil -%}
+                                    "state": "{{ payerN4.Elements[2].Value }}",
+                                {% endif -%}
+                                {% if payerN4.Elements[3].Value != "" and payerN4.Elements[3].Value != nil -%}
+                                    "postalCode": "{{ payerN4.Elements[3].Value }}",
+                                {% endif -%}
+                            {% endif -%}
+                            "country": "US"
+                        }
+                    ],
+                {% endif -%}
+                "active": true
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Organization/{{ insurerId }}"
+            }
+        },
+        {% comment %} ==== Organization Resource (Provider/Information Receiver) ==== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ providerOrgId }}",
+            "resource": {
+                "resourceType": "Organization",
+                "id": "{{ providerOrgId }}",
+                {% if providerNM1 -%}
+                    {% if providerNM1.Elements[9].Value != "" and providerNM1.Elements[9].Value != nil -%}
+                        "identifier": [
+                            {
+                                "system": "https://x12.org/codes/identification-code-qualifier/{{ providerNM1.Elements[8].Value }}",
+                                "value": "{{ providerNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    {% if providerNM1.Elements[2].Value == "2" -%}
+                        "name": "{{ providerNM1.Elements[3].Value }}",
+                    {% else -%}
+                        "name": "{{ providerNM1.Elements[3].Value }}, {{ providerNM1.Elements[4].Value }}",
+                    {% endif -%}
+                {% endif -%}
+                "type": [
+                    {
+                        "coding": [
+                            {
+                                "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                                "code": "prov",
+                                "display": "Healthcare Provider"
+                            }
+                        ]
+                    }
+                ],
+                {% if providerN3 or providerN4 -%}
+                    "address": [
+                        {
+                            {% if providerN3 -%}
+                                "line": [
+                                    "{{ providerN3.Elements[1].Value }}"
+                                ],
+                            {% endif -%}
+                            {% if providerN4 -%}
+                                {% if providerN4.Elements[1].Value != "" and providerN4.Elements[1].Value != nil -%}
+                                    "city": "{{ providerN4.Elements[1].Value }}",
+                                {% endif -%}
+                                {% if providerN4.Elements[2].Value != "" and providerN4.Elements[2].Value != nil -%}
+                                    "state": "{{ providerN4.Elements[2].Value }}",
+                                {% endif -%}
+                                {% if providerN4.Elements[3].Value != "" and providerN4.Elements[3].Value != nil -%}
+                                    "postalCode": "{{ providerN4.Elements[3].Value }}",
+                                {% endif -%}
+                            {% endif -%}
+                            "country": "US"
+                        }
+                    ],
+                {% endif -%}
+                "active": true
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Organization/{{ providerOrgId }}"
+            }
+        },
+        {% comment %} ==== Practitioner Resource (if applicable) ==== {% endcomment -%}
+        {% if hasPractitioner -%}
+            {
+                "fullUrl": "urn:uuid:{{ practitionerId }}",
+                "resource": {
+                    "resourceType": "Practitioner",
+                    "id": "{{ practitionerId }}",
+                    {% if providerNM1.Elements[9].Value != "" and providerNM1.Elements[9].Value != nil -%}
+                        "identifier": [
+                            {
+                                "system": "https://x12.org/codes/identification-code-qualifier/{{ providerNM1.Elements[8].Value }}",
+                                "value": "{{ providerNM1.Elements[9].Value }}"
+                            }
+                        ],
+                    {% endif -%}
+                    "name": [
+                        {
+                            "use": "official",
+                            {% if providerNM1.Elements[3].Value != "" and providerNM1.Elements[3].Value != nil -%}
+                                "family": "{{ providerNM1.Elements[3].Value }}",
+                            {% endif -%}
+                            "given": [
+                                {% if providerNM1.Elements[4].Value != "" and providerNM1.Elements[4].Value != nil -%}
+                                    "{{ providerNM1.Elements[4].Value }}"{% if providerNM1.Elements[5].Value != "" and providerNM1.Elements[5].Value != nil %},{% endif %}
+                                {% endif -%}
+                                {% if providerNM1.Elements[5].Value != "" and providerNM1.Elements[5].Value != nil -%}
+                                    "{{ providerNM1.Elements[5].Value }}"
+                                {% endif -%}
+                            ]
+                        }
+                    ],
+                    "active": true
+                },
+                "request": {
+                    "method": "PUT",
+                    "url": "Practitioner/{{ practitionerId }}"
+                }
+            },
+        {% endif -%}
+        {% comment %} ==== Coverage Resource ==== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ coverageId }}",
+            "resource": {
+                "resourceType": "Coverage",
+                "id": "{{ coverageId }}",
+                "status": "active",
+                "beneficiary": {
+                    "reference": "Patient/{{ patientId }}"
+                },
+                {% if hasDependent and hasSubscriber -%}
+                    "subscriber": {
+                        "reference": "Patient/{{ subscriberPatientId }}"
+                    },
+                    "relationship": {
+                        "coding": [
+                            {
+                                "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                                "code": "other",
+                                "display": "Other"
+                            }
+                        ]
+                    },
+                {% else -%}
+                    "subscriber": {
+                        "reference": "Patient/{{ patientId }}"
+                    },
+                    "relationship": {
+                        "coding": [
+                            {
+                                "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                                "code": "self",
+                                "display": "Self"
+                            }
+                        ]
+                    },
+                {% endif -%}
+                {% if subscriberNM1.Elements[9].Value != "" and subscriberNM1.Elements[9].Value != nil -%}
+                    "subscriberId": "{{ subscriberNM1.Elements[9].Value }}",
+                {% endif -%}
+                "payor": [
+                    {
+                        "reference": "Organization/{{ insurerId }}"
+                    }
+                ],
+                {% comment %} ---- Coverage period from subscriber DTP segments ---- {% endcomment -%}
+                {% if subscriberDTP -%}
+                    {% if subscriberDTP.Elements[1].Value == "291" or subscriberDTP.Elements[1].Value == "307" -%}
+                        {% assign dtpDateValue = subscriberDTP.Elements[3].Value -%}
+                        {% if subscriberDTP.Elements[2].Value == "RD8" -%}
+                            {% comment %} Range format: CCYYMMDD-CCYYMMDD {% endcomment -%}
+                            {% assign dateParts = dtpDateValue | split: '-' -%}
+                            "period": {
+                                {% if dateParts[0].size == 8 -%}
+                                    "start": "{{ dateParts[0] | slice: 0, 4 }}-{{ dateParts[0] | slice: 4, 2 }}-{{ dateParts[0] | slice: 6, 2 }}"{% if dateParts[1] %},
+                                    "end": "{{ dateParts[1] | slice: 0, 4 }}-{{ dateParts[1] | slice: 4, 2 }}-{{ dateParts[1] | slice: 6, 2 }}"{% endif %}
+                                {% else -%}
+                                    "start": "{{ dateParts[0] }}"
+                                {% endif -%}
+                            },
+                        {% elsif subscriberDTP.Elements[2].Value == "D8" -%}
+                            {% comment %} Single date format: CCYYMMDD {% endcomment -%}
+                            "period": {
+                                {% if dtpDateValue.size == 8 -%}
+                                    "start": "{{ dtpDateValue | slice: 0, 4 }}-{{ dtpDateValue | slice: 4, 2 }}-{{ dtpDateValue | slice: 6, 2 }}"
+                                {% else -%}
+                                    "start": "{{ dtpDateValue }}"
+                                {% endif -%}
+                            },
+                        {% endif -%}
+                    {% endif -%}
+                {% endif -%}
+                {% comment %} ---- Coverage class from active EB segments ---- {% endcomment -%}
+                {% assign hasClassInfo = false -%}
+                {% for ebSeg in activeEBSegments -%}
+                    {% if ebSeg.Elements[5].Value != "" and ebSeg.Elements[5].Value != nil -%}
+                        {% assign hasClassInfo = true -%}
+                        {% break -%}
+                    {% endif -%}
+                {% endfor -%}
+                {% if hasClassInfo -%}
+                    "class": [
+                        {% assign classComma = false -%}
+                        {% for ebSeg in activeEBSegments -%}
+                            {% if ebSeg.Elements[5].Value != "" and ebSeg.Elements[5].Value != nil -%}
+                                {% if classComma %},{% endif -%}
+                                {
+                                    "type": {
+                                        "coding": [
+                                            {
+                                                "system": "http://terminology.hl7.org/CodeSystem/coverage-class",
+                                                "code": "plan"
+                                            }
+                                        ]
+                                    },
+                                    "value": "{{ ebSeg.Elements[5].Value }}",
+                                    "name": "{{ ebSeg.Elements[5].Value }}"
+                                }
+                                {% assign classComma = true -%}
+                            {% endif -%}
+                        {% endfor -%}
+                    ],
+                {% endif -%}
+                "type": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+                            "code": "HIP",
+                            "display": "health insurance plan policy"
+                        }
+                    ]
+                }
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Coverage/{{ coverageId }}"
+            }
+        }
+    ]
+}

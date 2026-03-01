@@ -1,0 +1,433 @@
+{% comment %}
+  X12 277 - Health Care Claim Status Response
+  Converts X12 277 transaction to FHIR R4 Bundle containing:
+    - ClaimResponse (with status information from STC segments)
+    - Patient
+    - Organization (information source, information receiver)
+
+  HL Hierarchy Level Codes:
+    20 = Information Source
+    21 = Information Receiver
+    19 = Provider
+    22 = Subscriber
+    23 = Dependent
+
+  STC Segment (Status Information):
+    STC01 = Health Care Claim Status (composite: STC01-1 category code, STC01-2 status code)
+    STC02 = Status Effective Date
+    STC03 = Action Code
+    STC04 = Total Claim Charge Amount
+{% endcomment -%}
+
+{% assign firstSegs = x12Data | get_first_x12_segments: 'ISA|GS|ST|BHT' -%}
+{% assign hlLoops = x12Data | split_x12_by_hl_loop -%}
+{% assign refSegments = x12Data | get_x12_segments_by_type: 'REF' -%}
+{% assign dtpSegments = x12Data | get_x12_segments_by_type: 'DTP' -%}
+{% assign trnSegments = x12Data | get_x12_segments_by_type: 'TRN' -%}
+{% assign stcSegments = x12Data | get_x12_segments_by_type: 'STC' -%}
+
+{% comment %} Walk HL loops to extract NM1 segments by hierarchical level {% endcomment -%}
+{% assign infoSourceNM1 = null -%}
+{% assign infoReceiverNM1 = null -%}
+{% assign providerNM1 = null -%}
+{% assign subscriberNM1 = null -%}
+{% assign dependentNM1 = null -%}
+
+{% for loop in hlLoops -%}
+  {% assign loopFirst = loop | get_first_x12_segments: 'HL|NM1|TRN|STC|REF|DTP' -%}
+  {% if loopFirst.HL -%}
+    {% assign hlLevelCode = loopFirst.HL.Elements[3].Value -%}
+    {% if hlLevelCode == "20" -%}
+      {% if loopFirst.NM1 %}{% assign infoSourceNM1 = loopFirst.NM1 %}{% endif -%}
+    {% endif -%}
+    {% if hlLevelCode == "21" -%}
+      {% if loopFirst.NM1 %}{% assign infoReceiverNM1 = loopFirst.NM1 %}{% endif -%}
+    {% endif -%}
+    {% if hlLevelCode == "19" -%}
+      {% if loopFirst.NM1 %}{% assign providerNM1 = loopFirst.NM1 %}{% endif -%}
+    {% endif -%}
+    {% if hlLevelCode == "22" -%}
+      {% if loopFirst.NM1 %}{% assign subscriberNM1 = loopFirst.NM1 %}{% endif -%}
+    {% endif -%}
+    {% if hlLevelCode == "23" -%}
+      {% if loopFirst.NM1 %}{% assign dependentNM1 = loopFirst.NM1 %}{% endif -%}
+    {% endif -%}
+  {% endif -%}
+{% endfor -%}
+
+{% comment %} Determine the patient: dependent if present, otherwise subscriber {% endcomment -%}
+{% if dependentNM1 -%}
+  {% assign patientNM1 = dependentNM1 -%}
+{% else -%}
+  {% assign patientNM1 = subscriberNM1 -%}
+{% endif -%}
+
+{% comment %} Extract references {% endcomment -%}
+{% assign claimRef = null -%}
+{% assign payerClaimRef = null -%}
+{% for ref in refSegments -%}
+  {% if ref.Elements[1].Value == "EJ" -%}
+    {% assign claimRef = ref -%}
+  {% endif -%}
+  {% if ref.Elements[1].Value == "1K" -%}
+    {% assign payerClaimRef = ref -%}
+  {% endif -%}
+{% endfor -%}
+
+{% comment %} Extract service date {% endcomment -%}
+{% assign serviceDate = null -%}
+{% for dtp in dtpSegments -%}
+  {% if dtp.Elements[1].Value == "472" -%}
+    {% assign serviceDate = dtp -%}
+  {% endif -%}
+{% endfor -%}
+
+{% comment %} Extract trace number {% endcomment -%}
+{% assign traceNum = null -%}
+{% if trnSegments.size > 0 -%}
+  {% assign traceNum = trnSegments[0] -%}
+{% endif -%}
+
+{% comment %} Extract primary STC segment {% endcomment -%}
+{% assign primarySTC = null -%}
+{% if stcSegments.size > 0 -%}
+  {% assign primarySTC = stcSegments[0] -%}
+{% endif -%}
+
+{% assign bundleId = firstSegs.ISA.Elements[13].Value -%}
+{
+  "resourceType": "Bundle",
+  "type": "batch",
+  {% if firstSegs.GS -%}
+    "timestamp": "{{ firstSegs.GS.Elements[4].Value | slice: 0, 4 }}-{{ firstSegs.GS.Elements[4].Value | slice: 4, 2 }}-{{ firstSegs.GS.Elements[4].Value | slice: 6, 2 }}T00:00:00Z",
+  {% endif -%}
+  "identifier": {
+    "value": "{{ bundleId }}"
+  },
+  "id": "{{ bundleId }}",
+  "entry": [
+    {% comment %} ClaimResponse Resource {% endcomment -%}
+    {
+      "fullUrl": "urn:uuid:claimresponse-{{ bundleId }}",
+      "resource": {
+        "resourceType": "ClaimResponse",
+        "id": "claimresponse-{{ bundleId }}",
+        "status": "active",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+              "code": "professional",
+              "display": "Professional"
+            }
+          ]
+        },
+        "use": "claim",
+        {% if firstSegs.BHT -%}
+          "identifier": [
+            {
+              "system": "urn:x12:bht",
+              "value": "{{ firstSegs.BHT.Elements[2].Value }}"
+            }
+            {% if payerClaimRef -%}
+              ,{
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "FILL",
+                      "display": "Filler Identifier"
+                    }
+                  ]
+                },
+                "value": "{{ payerClaimRef.Elements[2].Value }}"
+              }
+            {% endif -%}
+          ],
+          {% if firstSegs.BHT.Elements[3].Value != "" -%}
+            "created": "{{ firstSegs.BHT.Elements[3].Value | slice: 0, 4 }}-{{ firstSegs.BHT.Elements[3].Value | slice: 4, 2 }}-{{ firstSegs.BHT.Elements[3].Value | slice: 6, 2 }}",
+          {% endif -%}
+        {% endif -%}
+        {% if traceNum -%}
+          "preAuthRef": [
+            "{{ traceNum.Elements[2].Value }}"
+          ],
+        {% endif -%}
+        {% if patientNM1 -%}
+          "patient": {
+            "reference": "Patient/patient-{{ patientNM1.Elements[9].Value | default: bundleId }}"
+          },
+        {% endif -%}
+        {% if infoSourceNM1 -%}
+          "insurer": {
+            "reference": "Organization/org-source-{{ infoSourceNM1.Elements[9].Value | default: bundleId }}"
+          },
+        {% endif -%}
+        "outcome": {% if primarySTC %}"queued"{% else %}"complete"{% endif %},
+        {% comment %} Map STC segments to processNote and extension for status info {% endcomment -%}
+        {% if stcSegments.size > 0 -%}
+          "processNote": [
+            {% for stc in stcSegments -%}
+              {
+                "number": {{ forloop.index }},
+                "type": "display",
+                "text": "Status Category: {{ stc.Elements[1].SubElements[1] }}{% if stc.Elements[1].SubElements[2] != "" %}, Status Code: {{ stc.Elements[1].SubElements[2] }}{% endif %}{% if stc.Elements[3].Value != "" %}, Action Code: {{ stc.Elements[3].Value }}{% endif %}{% if stc.Elements[2].Value != "" %}, Effective Date: {{ stc.Elements[2].Value | slice: 0, 4 }}-{{ stc.Elements[2].Value | slice: 4, 2 }}-{{ stc.Elements[2].Value | slice: 6, 2 }}{% endif %}"
+              }{% unless forloop.last %},{% endunless %}
+            {% endfor -%}
+          ],
+          "extension": [
+            {% for stc in stcSegments -%}
+              {
+                "url": "http://hl7.org/fhir/us/davinci-ehrx/StructureDefinition/claim-status",
+                "extension": [
+                  {
+                    "url": "categoryCode",
+                    "valueCodeableConcept": {
+                      "coding": [
+                        {
+                          "system": "https://www.wpc-edi.com/reference/codelists/healthcare/claim-status-category-codes",
+                          "code": "{{ stc.Elements[1].SubElements[1] }}"
+                        }
+                      ]
+                    }
+                  }
+                  {% if stc.Elements[1].SubElements[2] != "" -%}
+                    ,{
+                      "url": "statusCode",
+                      "valueCodeableConcept": {
+                        "coding": [
+                          {
+                            "system": "https://www.wpc-edi.com/reference/codelists/healthcare/claim-status-codes",
+                            "code": "{{ stc.Elements[1].SubElements[2] }}"
+                          }
+                        ]
+                      }
+                    }
+                  {% endif -%}
+                  {% if stc.Elements[2].Value != "" -%}
+                    ,{
+                      "url": "effectiveDate",
+                      "valueDate": "{{ stc.Elements[2].Value | slice: 0, 4 }}-{{ stc.Elements[2].Value | slice: 4, 2 }}-{{ stc.Elements[2].Value | slice: 6, 2 }}"
+                    }
+                  {% endif -%}
+                  {% if stc.Elements[3].Value != "" -%}
+                    ,{
+                      "url": "actionCode",
+                      "valueCode": "{{ stc.Elements[3].Value }}"
+                    }
+                  {% endif -%}
+                ]
+              }{% unless forloop.last %},{% endunless %}
+            {% endfor -%}
+          ],
+        {% endif -%}
+        {% comment %} Total from STC04 of the first STC segment {% endcomment -%}
+        {% if primarySTC -%}
+          {% if primarySTC.Elements[4].Value != "" -%}
+            "total": [
+              {
+                "category": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                      "code": "submitted",
+                      "display": "Submitted Amount"
+                    }
+                  ]
+                },
+                "amount": {
+                  "value": {{ primarySTC.Elements[4].Value }},
+                  "currency": "USD"
+                }
+              }
+            ],
+          {% endif -%}
+        {% endif -%}
+        {% comment %} Service date period {% endcomment -%}
+        {% if serviceDate -%}
+          "item": [
+            {
+              "itemSequence": 1,
+              {% if serviceDate.Elements[2].Value == "D8" -%}
+                "servicedDate": "{{ serviceDate.Elements[3].Value | slice: 0, 4 }}-{{ serviceDate.Elements[3].Value | slice: 4, 2 }}-{{ serviceDate.Elements[3].Value | slice: 6, 2 }}",
+              {% elsif serviceDate.Elements[2].Value == "RD8" -%}
+                "servicedPeriod": {
+                  "start": "{{ serviceDate.Elements[3].Value | slice: 0, 4 }}-{{ serviceDate.Elements[3].Value | slice: 4, 2 }}-{{ serviceDate.Elements[3].Value | slice: 6, 2 }}",
+                  "end": "{{ serviceDate.Elements[3].Value | slice: 9, 4 }}-{{ serviceDate.Elements[3].Value | slice: 13, 2 }}-{{ serviceDate.Elements[3].Value | slice: 15, 2 }}"
+                },
+              {% endif -%}
+              "adjudication": [
+                {
+                  "category": {
+                    "coding": [
+                      {
+                        "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                        "code": "submitted",
+                        "display": "Submitted Amount"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ],
+        {% endif -%}
+        {% if claimRef -%}
+          "request": {
+            "identifier": {
+              "value": "{{ claimRef.Elements[2].Value }}"
+            }
+          },
+        {% endif -%}
+        "disposition": "{% if primarySTC %}{{ primarySTC.Elements[1].SubElements[1] }}{% else %}Unknown{% endif %}"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "ClaimResponse/claimresponse-{{ bundleId }}"
+      }
+    },
+
+    {% comment %} Patient Resource {% endcomment -%}
+    {% if patientNM1 -%}
+      {
+        "fullUrl": "urn:uuid:patient-{{ patientNM1.Elements[9].Value | default: bundleId }}",
+        "resource": {
+          "resourceType": "Patient",
+          "id": "patient-{{ patientNM1.Elements[9].Value | default: bundleId }}",
+          "identifier": [
+            {
+              {% if patientNM1.Elements[8].Value == "MI" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "MB",
+                      "display": "Member Number"
+                    }
+                  ]
+                },
+              {% endif -%}
+              "value": "{{ patientNM1.Elements[9].Value }}"
+            }
+          ],
+          "name": [
+            {
+              {% if patientNM1.Elements[3].Value != "" -%}
+                "family": "{{ patientNM1.Elements[3].Value }}",
+              {% endif -%}
+              {% if patientNM1.Elements[4].Value != "" -%}
+                "given": [
+                  "{{ patientNM1.Elements[4].Value }}"
+                  {% if patientNM1.Elements[5].Value != "" -%}
+                    , "{{ patientNM1.Elements[5].Value }}"
+                  {% endif -%}
+                ],
+              {% endif -%}
+              "use": "official"
+            }
+          ]
+        },
+        "request": {
+          "method": "PUT",
+          "url": "Patient/patient-{{ patientNM1.Elements[9].Value | default: bundleId }}"
+        }
+      },
+    {% endif -%}
+
+    {% comment %} Information Source Organization {% endcomment -%}
+    {% if infoSourceNM1 -%}
+      {
+        "fullUrl": "urn:uuid:org-source-{{ infoSourceNM1.Elements[9].Value | default: bundleId }}",
+        "resource": {
+          "resourceType": "Organization",
+          "id": "org-source-{{ infoSourceNM1.Elements[9].Value | default: bundleId }}",
+          "identifier": [
+            {
+              {% if infoSourceNM1.Elements[8].Value == "PI" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "NIIP",
+                      "display": "Payor ID"
+                    }
+                  ]
+                },
+              {% elsif infoSourceNM1.Elements[8].Value == "XV" -%}
+                "type": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                      "code": "NIIP",
+                      "display": "National Plan Identifier"
+                    }
+                  ]
+                },
+              {% endif -%}
+              "value": "{{ infoSourceNM1.Elements[9].Value }}"
+            }
+          ],
+          {% if infoSourceNM1.Elements[2].Value == "2" -%}
+            "name": "{{ infoSourceNM1.Elements[3].Value }}",
+          {% else -%}
+            "name": "{{ infoSourceNM1.Elements[3].Value }}{% if infoSourceNM1.Elements[4].Value != "" %} {{ infoSourceNM1.Elements[4].Value }}{% endif %}",
+          {% endif -%}
+          "type": [
+            {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                  "code": "ins",
+                  "display": "Insurance Company"
+                }
+              ]
+            }
+          ]
+        },
+        "request": {
+          "method": "PUT",
+          "url": "Organization/org-source-{{ infoSourceNM1.Elements[9].Value | default: bundleId }}"
+        }
+      }{% if infoReceiverNM1 %},{% endif %}
+    {% endif -%}
+
+    {% comment %} Information Receiver Organization {% endcomment -%}
+    {% if infoReceiverNM1 -%}
+      {
+        "fullUrl": "urn:uuid:org-receiver-{{ infoReceiverNM1.Elements[9].Value | default: bundleId }}",
+        "resource": {
+          "resourceType": "Organization",
+          "id": "org-receiver-{{ infoReceiverNM1.Elements[9].Value | default: bundleId }}",
+          "identifier": [
+            {
+              {% if infoReceiverNM1.Elements[8].Value == "XX" -%}
+                "system": "http://hl7.org/fhir/sid/us-npi",
+              {% endif -%}
+              "value": "{{ infoReceiverNM1.Elements[9].Value }}"
+            }
+          ],
+          {% if infoReceiverNM1.Elements[2].Value == "2" -%}
+            "name": "{{ infoReceiverNM1.Elements[3].Value }}",
+          {% else -%}
+            "name": "{{ infoReceiverNM1.Elements[3].Value }}{% if infoReceiverNM1.Elements[4].Value != "" %} {{ infoReceiverNM1.Elements[4].Value }}{% endif %}",
+          {% endif -%}
+          "type": [
+            {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/organization-type",
+                  "code": "prov",
+                  "display": "Healthcare Provider"
+                }
+              ]
+            }
+          ]
+        },
+        "request": {
+          "method": "PUT",
+          "url": "Organization/org-receiver-{{ infoReceiverNM1.Elements[9].Value | default: bundleId }}"
+        }
+      }
+    {% endif -%}
+  ]
+}

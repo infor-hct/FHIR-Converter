@@ -1,0 +1,1448 @@
+{% comment %}
+  X12 278 Health Care Services Review - Prior Authorization
+  Converts X12 278 to FHIR R4 Bundle containing:
+    - Claim (use=preauthorization)
+    - ClaimResponse (if HCR segment present)
+    - Patient
+    - Organization (UMO, requester)
+    - Practitioner (requester, service provider)
+    - Coverage
+    - Condition (from HI diagnosis codes)
+    - ServiceRequest (from SV1/SV2)
+{% endcomment -%}
+{% assign hlLoops = x12Data | split_x12_by_hl_loop -%}
+{% assign headerSegments = x12Data | get_first_x12_segments: 'ISA|GS|ST|BHT' -%}
+{% assign allNM1 = x12Data | get_x12_segments_by_type: 'NM1' -%}
+{% assign allHL = x12Data | get_x12_segments_by_type: 'HL' -%}
+{% assign allREF = x12Data | get_x12_segments_by_type: 'REF' -%}
+{% assign allDTP = x12Data | get_x12_segments_by_type: 'DTP' -%}
+{% assign allUM = x12Data | get_x12_segments_by_type: 'UM' -%}
+{% assign allHCR = x12Data | get_x12_segments_by_type: 'HCR' -%}
+{% assign allSV1 = x12Data | get_x12_segments_by_type: 'SV1' -%}
+{% assign allSV2 = x12Data | get_x12_segments_by_type: 'SV2' -%}
+{% assign allHI = x12Data | get_x12_segments_by_type: 'HI' -%}
+{% assign allCL1 = x12Data | get_x12_segments_by_type: 'CL1' -%}
+{% comment %} Identify HL loops by level code (HL03) {% endcomment -%}
+{% comment %}
+  HL03 codes for 278:
+    1  = Information Source (Utilization Management Organization)
+    2  = Information Receiver (Requester)
+    22 = Subscriber
+    23 = Dependent
+    SS = Service (Patient Event)
+    EV = Patient Event (alternate)
+{% endcomment -%}
+{% comment %} Walk the HL loops to find entities {% endcomment -%}
+{% assign umoNM1 = null -%}
+{% assign requesterNM1 = null -%}
+{% assign subscriberNM1 = null -%}
+{% assign dependentNM1 = null -%}
+{% assign serviceProviderNM1 = null -%}
+{% assign umSegment = null -%}
+{% assign hcrSegment = null -%}
+{% assign sv1Segment = null -%}
+{% assign sv2Segment = null -%}
+{% assign subscriberHL = null -%}
+{% assign dependentHL = null -%}
+{% assign serviceHL = null -%}
+{% assign umoHL = null -%}
+{% assign requesterHL = null -%}
+{% for loop in hlLoops -%}
+    {% assign loopFirstSegs = loop | get_first_x12_segments: 'HL|NM1|UM|HCR|SV1|SV2|HI|DTP|REF|CL1|CR1' -%}
+    {% if loopFirstSegs.HL -%}
+        {% assign hlLevelCode = loopFirstSegs.HL.Elements[3].Value -%}
+        {% if hlLevelCode == "20" or hlLevelCode == "1" -%}
+            {% assign umoHL = loopFirstSegs.HL -%}
+            {% if loopFirstSegs.NM1 -%}
+                {% assign umoNM1 = loopFirstSegs.NM1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "21" or hlLevelCode == "2" -%}
+            {% assign requesterHL = loopFirstSegs.HL -%}
+            {% if loopFirstSegs.NM1 -%}
+                {% assign requesterNM1 = loopFirstSegs.NM1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "22" -%}
+            {% assign subscriberHL = loopFirstSegs.HL -%}
+            {% if loopFirstSegs.NM1 -%}
+                {% assign subscriberNM1 = loopFirstSegs.NM1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "23" -%}
+            {% assign dependentHL = loopFirstSegs.HL -%}
+            {% if loopFirstSegs.NM1 -%}
+                {% assign dependentNM1 = loopFirstSegs.NM1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if hlLevelCode == "SS" or hlLevelCode == "EV" -%}
+            {% assign serviceHL = loopFirstSegs.HL -%}
+            {% if loopFirstSegs.NM1 -%}
+                {% assign serviceProviderNM1 = loopFirstSegs.NM1 -%}
+            {% endif -%}
+            {% if loopFirstSegs.UM -%}
+                {% assign umSegment = loopFirstSegs.UM -%}
+            {% endif -%}
+            {% if loopFirstSegs.HCR -%}
+                {% assign hcrSegment = loopFirstSegs.HCR -%}
+            {% endif -%}
+            {% if loopFirstSegs.SV1 -%}
+                {% assign sv1Segment = loopFirstSegs.SV1 -%}
+            {% endif -%}
+            {% if loopFirstSegs.SV2 -%}
+                {% assign sv2Segment = loopFirstSegs.SV2 -%}
+            {% endif -%}
+        {% endif -%}
+    {% endif -%}
+{% endfor -%}
+{% comment %} If UM was not found in service loop, try globally {% endcomment -%}
+{% if umSegment == null -%}
+    {% if allUM.size > 0 -%}
+        {% assign umSegment = allUM[0] -%}
+    {% endif -%}
+{% endif -%}
+{% if hcrSegment == null -%}
+    {% if allHCR.size > 0 -%}
+        {% assign hcrSegment = allHCR[0] -%}
+    {% endif -%}
+{% endif -%}
+{% if sv1Segment == null -%}
+    {% if allSV1.size > 0 -%}
+        {% assign sv1Segment = allSV1[0] -%}
+    {% endif -%}
+{% endif -%}
+{% if sv2Segment == null -%}
+    {% if allSV2.size > 0 -%}
+        {% assign sv2Segment = allSV2[0] -%}
+    {% endif -%}
+{% endif -%}
+{% comment %} If NM1 not found by HL loop, try by NM1 entity identifier code {% endcomment -%}
+{% if umoNM1 == null or requesterNM1 == null or subscriberNM1 == null -%}
+    {% for nm1 in allNM1 -%}
+        {% assign entityCode = nm1.Elements[1].Value -%}
+        {% if entityCode == "X3" or entityCode == "PR" -%}
+            {% if umoNM1 == null -%}
+                {% assign umoNM1 = nm1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if entityCode == "SJ" or entityCode == "1P" -%}
+            {% if requesterNM1 == null -%}
+                {% assign requesterNM1 = nm1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if entityCode == "IL" -%}
+            {% if subscriberNM1 == null -%}
+                {% assign subscriberNM1 = nm1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if entityCode == "QC" -%}
+            {% if dependentNM1 == null -%}
+                {% assign dependentNM1 = nm1 -%}
+            {% endif -%}
+        {% endif -%}
+        {% if entityCode == "SV" or entityCode == "71" or entityCode == "FA" or entityCode == "1T" -%}
+            {% if serviceProviderNM1 == null -%}
+                {% assign serviceProviderNM1 = nm1 -%}
+            {% endif -%}
+        {% endif -%}
+    {% endfor -%}
+{% endif -%}
+{% comment %} Determine patient: dependent if present, else subscriber {% endcomment -%}
+{% if dependentNM1 -%}
+    {% assign patientNM1 = dependentNM1 -%}
+    {% assign isDependent = true -%}
+{% else -%}
+    {% assign patientNM1 = subscriberNM1 -%}
+    {% assign isDependent = false -%}
+{% endif -%}
+{% comment %} Generate resource IDs {% endcomment -%}
+{% assign patientIdInput = "Patient_278" -%}
+{% if patientNM1 -%}
+    {% assign patientIdInput = patientNM1.Value | prepend: "Patient_278_" -%}
+{% endif -%}
+{% assign patientId = patientIdInput | generate_uuid -%}
+{% assign fullPatientId = patientId | prepend: 'Patient/' -%}
+{% assign claimIdInput = "Claim_278" -%}
+{% if headerSegments.BHT -%}
+    {% assign claimIdInput = headerSegments.BHT.Elements[3].Value | prepend: "Claim_278_" -%}
+{% endif -%}
+{% assign claimId = claimIdInput | generate_uuid -%}
+{% assign coverageIdInput = "Coverage_278" -%}
+{% if subscriberNM1 -%}
+    {% assign coverageIdInput = subscriberNM1.Value | prepend: "Coverage_278_" -%}
+{% endif -%}
+{% assign coverageId = coverageIdInput | generate_uuid -%}
+{% assign umoOrgIdInput = "Organization_UMO_278" -%}
+{% if umoNM1 -%}
+    {% assign umoOrgIdInput = umoNM1.Value | prepend: "Organization_UMO_278_" -%}
+{% endif -%}
+{% assign umoOrgId = umoOrgIdInput | generate_uuid -%}
+{% assign requesterOrgIdInput = "Organization_Requester_278" -%}
+{% if requesterNM1 -%}
+    {% assign requesterOrgIdInput = requesterNM1.Value | prepend: "Organization_Requester_278_" -%}
+{% endif -%}
+{% assign requesterOrgId = requesterOrgIdInput | generate_uuid -%}
+{% assign requesterPractIdInput = "Practitioner_Requester_278" -%}
+{% if requesterNM1 -%}
+    {% assign requesterPractIdInput = requesterNM1.Value | prepend: "Practitioner_Requester_278_" -%}
+{% endif -%}
+{% assign requesterPractId = requesterPractIdInput | generate_uuid -%}
+{% assign serviceProviderPractIdInput = "Practitioner_ServiceProvider_278" -%}
+{% if serviceProviderNM1 -%}
+    {% assign serviceProviderPractIdInput = serviceProviderNM1.Value | prepend: "Practitioner_ServiceProvider_278_" -%}
+{% endif -%}
+{% assign serviceProviderPractId = serviceProviderPractIdInput | generate_uuid -%}
+{% assign serviceRequestIdInput = "ServiceRequest_278" -%}
+{% if sv1Segment -%}
+    {% assign serviceRequestIdInput = sv1Segment.Value | prepend: "ServiceRequest_278_" -%}
+{% elsif sv2Segment -%}
+    {% assign serviceRequestIdInput = sv2Segment.Value | prepend: "ServiceRequest_278_" -%}
+{% endif -%}
+{% assign serviceRequestId = serviceRequestIdInput | generate_uuid -%}
+{% assign claimResponseIdInput = "ClaimResponse_278" -%}
+{% if hcrSegment -%}
+    {% assign claimResponseIdInput = hcrSegment.Value | prepend: "ClaimResponse_278_" -%}
+{% endif -%}
+{% assign claimResponseId = claimResponseIdInput | generate_uuid -%}
+{% comment %} Collect REF segments for prior auth number {% endcomment -%}
+{% assign priorAuthRef = null -%}
+{% for ref in allREF -%}
+    {% if ref.Elements[1].Value == "BB" or ref.Elements[1].Value == "NT" -%}
+        {% if priorAuthRef == null -%}
+            {% assign priorAuthRef = ref -%}
+        {% endif -%}
+    {% endif -%}
+{% endfor -%}
+{% comment %} Collect DTP segments {% endcomment -%}
+{% assign serviceDateDTP = null -%}
+{% assign admissionDateDTP = null -%}
+{% assign certEffDateDTP = null -%}
+{% assign certExpDateDTP = null -%}
+{% for dtp in allDTP -%}
+    {% assign dtpQual = dtp.Elements[1].Value -%}
+    {% if dtpQual == "472" -%}
+        {% if serviceDateDTP == null -%}
+            {% assign serviceDateDTP = dtp -%}
+        {% endif -%}
+    {% endif -%}
+    {% if dtpQual == "435" -%}
+        {% if admissionDateDTP == null -%}
+            {% assign admissionDateDTP = dtp -%}
+        {% endif -%}
+    {% endif -%}
+    {% if dtpQual == "007" -%}
+        {% if certEffDateDTP == null -%}
+            {% assign certEffDateDTP = dtp -%}
+        {% endif -%}
+    {% endif -%}
+    {% if dtpQual == "036" -%}
+        {% if certExpDateDTP == null -%}
+            {% assign certExpDateDTP = dtp -%}
+        {% endif -%}
+    {% endif -%}
+{% endfor -%}
+{% comment %} Parse date formats: DTP02 is the date/time format qualifier {% endcomment -%}
+{% comment %}
+  DTP02: D8 = CCYYMMDD, RD8 = CCYYMMDD-CCYYMMDD range
+{% endcomment -%}
+{
+    "resourceType": "Bundle",
+    "type": "batch",
+    {% if headerSegments.BHT -%}
+        {% assign bundleIdInput = headerSegments.BHT.Value | prepend: "Bundle_278_" -%}
+        "id": "{{ bundleIdInput | generate_uuid }}",
+    {% endif -%}
+    {% if headerSegments.GS -%}
+        {% if headerSegments.GS.Elements[4].Value != "" -%}
+            {% assign gsDate = headerSegments.GS.Elements[4].Value -%}
+            {% assign gsYear = gsDate | slice: 0, 4 -%}
+            {% assign gsMonth = gsDate | slice: 4, 2 -%}
+            {% assign gsDay = gsDate | slice: 6, 2 -%}
+            "timestamp": "{{ gsYear }}-{{ gsMonth }}-{{ gsDay }}T00:00:00Z",
+        {% endif -%}
+    {% endif -%}
+    "identifier": {
+        {% if headerSegments.ISA -%}
+            "value": "{{ headerSegments.ISA.Elements[13].Value }}"
+        {% else -%}
+            "value": "278-unknown"
+        {% endif -%}
+    },
+    "entry": [
+        {% comment %} ============== Patient Resource ============== {% endcomment -%}
+        {% if patientNM1 -%}
+        {
+            "fullUrl": "urn:uuid:{{ patientId }}",
+            "resource": {
+                "resourceType": "Patient",
+                "id": "{{ patientId }}",
+                {% comment %} NM1 entity type: 1=Person, 2=Non-person {% endcomment -%}
+                {% if patientNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% comment %} NM108=MI means Member ID, NM109=value {% endcomment -%}
+                        {% if patientNM1.Elements[8].Value == "MI" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "MB",
+                                    "display": "Member Number"
+                                }
+                            ]
+                        },
+                        {% elsif patientNM1.Elements[8].Value == "II" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "PT",
+                                    "display": "Patient external identifier"
+                                }
+                            ]
+                        },
+                        {% endif -%}
+                        "value": "{{ patientNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                "name": [
+                    {
+                        "use": "official",
+                        "family": "{{ patientNM1.Elements[3].Value }}",
+                        "given": [
+                            "{{ patientNM1.Elements[4].Value }}"
+                            {% if patientNM1.Elements[5].Value != "" -%}
+                            ,"{{ patientNM1.Elements[5].Value }}"
+                            {% endif -%}
+                        ]
+                        {% if patientNM1.Elements[6].Value != "" -%}
+                        ,"prefix": [
+                            "{{ patientNM1.Elements[6].Value }}"
+                        ]
+                        {% endif -%}
+                        {% if patientNM1.Elements[7].Value != "" -%}
+                        ,"suffix": [
+                            "{{ patientNM1.Elements[7].Value }}"
+                        ]
+                        {% endif -%}
+                    }
+                ]
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Patient/{{ patientId }}"
+            }
+        },
+        {% endif -%}
+        {% comment %} ============== UMO Organization Resource ============== {% endcomment -%}
+        {% if umoNM1 -%}
+        {
+            "fullUrl": "urn:uuid:{{ umoOrgId }}",
+            "resource": {
+                "resourceType": "Organization",
+                "id": "{{ umoOrgId }}",
+                {% if umoNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% if umoNM1.Elements[8].Value == "PI" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "PI",
+                                    "display": "Payor Identification"
+                                }
+                            ]
+                        },
+                        {% elsif umoNM1.Elements[8].Value == "XV" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NPI"
+                                }
+                            ]
+                        },
+                        "system": "http://hl7.org/fhir/sid/us-npi",
+                        {% elsif umoNM1.Elements[8].Value == "46" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NIIP",
+                                    "display": "National Insurance Payor Identifier"
+                                }
+                            ]
+                        },
+                        {% endif -%}
+                        "value": "{{ umoNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                {% if umoNM1.Elements[2].Value == "2" -%}
+                "name": "{{ umoNM1.Elements[3].Value }}"
+                {% else -%}
+                "name": "{{ umoNM1.Elements[4].Value }} {{ umoNM1.Elements[3].Value }}"
+                {% endif -%}
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Organization/{{ umoOrgId }}"
+            }
+        },
+        {% endif -%}
+        {% comment %} ============== Requester Organization Resource ============== {% endcomment -%}
+        {% if requesterNM1 -%}
+            {% if requesterNM1.Elements[2].Value == "2" -%}
+        {
+            "fullUrl": "urn:uuid:{{ requesterOrgId }}",
+            "resource": {
+                "resourceType": "Organization",
+                "id": "{{ requesterOrgId }}",
+                {% if requesterNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% if requesterNM1.Elements[8].Value == "XV" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NPI"
+                                }
+                            ]
+                        },
+                        "system": "http://hl7.org/fhir/sid/us-npi",
+                        {% endif -%}
+                        "value": "{{ requesterNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                "name": "{{ requesterNM1.Elements[3].Value }}"
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Organization/{{ requesterOrgId }}"
+            }
+        },
+            {% endif -%}
+        {% comment %} ============== Requester Practitioner Resource ============== {% endcomment -%}
+            {% if requesterNM1.Elements[2].Value == "1" -%}
+        {
+            "fullUrl": "urn:uuid:{{ requesterPractId }}",
+            "resource": {
+                "resourceType": "Practitioner",
+                "id": "{{ requesterPractId }}",
+                {% if requesterNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% if requesterNM1.Elements[8].Value == "XV" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NPI"
+                                }
+                            ]
+                        },
+                        "system": "http://hl7.org/fhir/sid/us-npi",
+                        {% endif -%}
+                        "value": "{{ requesterNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                "name": [
+                    {
+                        "family": "{{ requesterNM1.Elements[3].Value }}",
+                        "given": [
+                            "{{ requesterNM1.Elements[4].Value }}"
+                            {% if requesterNM1.Elements[5].Value != "" -%}
+                            ,"{{ requesterNM1.Elements[5].Value }}"
+                            {% endif -%}
+                        ]
+                    }
+                ]
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Practitioner/{{ requesterPractId }}"
+            }
+        },
+            {% endif -%}
+        {% endif -%}
+        {% comment %} ============== Service Provider Practitioner Resource ============== {% endcomment -%}
+        {% if serviceProviderNM1 -%}
+        {
+            "fullUrl": "urn:uuid:{{ serviceProviderPractId }}",
+            "resource": {
+                {% if serviceProviderNM1.Elements[2].Value == "1" -%}
+                "resourceType": "Practitioner",
+                "id": "{{ serviceProviderPractId }}",
+                {% if serviceProviderNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% if serviceProviderNM1.Elements[8].Value == "XV" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NPI"
+                                }
+                            ]
+                        },
+                        "system": "http://hl7.org/fhir/sid/us-npi",
+                        {% endif -%}
+                        "value": "{{ serviceProviderNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                "name": [
+                    {
+                        "family": "{{ serviceProviderNM1.Elements[3].Value }}",
+                        "given": [
+                            "{{ serviceProviderNM1.Elements[4].Value }}"
+                            {% if serviceProviderNM1.Elements[5].Value != "" -%}
+                            ,"{{ serviceProviderNM1.Elements[5].Value }}"
+                            {% endif -%}
+                        ]
+                    }
+                ]
+                {% else -%}
+                "resourceType": "Organization",
+                "id": "{{ serviceProviderPractId }}",
+                {% if serviceProviderNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% if serviceProviderNM1.Elements[8].Value == "XV" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "NPI"
+                                }
+                            ]
+                        },
+                        "system": "http://hl7.org/fhir/sid/us-npi",
+                        {% endif -%}
+                        "value": "{{ serviceProviderNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                "name": "{{ serviceProviderNM1.Elements[3].Value }}"
+                {% endif -%}
+            },
+            "request": {
+                "method": "PUT",
+                {% if serviceProviderNM1.Elements[2].Value == "1" -%}
+                "url": "Practitioner/{{ serviceProviderPractId }}"
+                {% else -%}
+                "url": "Organization/{{ serviceProviderPractId }}"
+                {% endif -%}
+            }
+        },
+        {% endif -%}
+        {% comment %} ============== Coverage Resource ============== {% endcomment -%}
+        {% if subscriberNM1 -%}
+        {
+            "fullUrl": "urn:uuid:{{ coverageId }}",
+            "resource": {
+                "resourceType": "Coverage",
+                "id": "{{ coverageId }}",
+                "status": "active",
+                {% if subscriberNM1.Elements[9].Value != "" -%}
+                "subscriberId": "{{ subscriberNM1.Elements[9].Value }}",
+                {% endif -%}
+                "beneficiary": {
+                    "reference": "Patient/{{ patientId }}"
+                },
+                {% if isDependent -%}
+                "relationship": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                            "code": "other"
+                        }
+                    ]
+                },
+                {% else -%}
+                "relationship": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+                            "code": "self"
+                        }
+                    ]
+                },
+                {% endif -%}
+                {% if umoNM1 -%}
+                "payor": [
+                    {
+                        "reference": "Organization/{{ umoOrgId }}"
+                    }
+                ],
+                {% endif -%}
+                "subscriber": {
+                    {% if isDependent -%}
+                        {% assign subscriberPatIdInput = subscriberNM1.Value | prepend: "Patient_Subscriber_278_" -%}
+                        {% assign subscriberPatId = subscriberPatIdInput | generate_uuid -%}
+                        "reference": "Patient/{{ subscriberPatId }}"
+                    {% else -%}
+                        "reference": "Patient/{{ patientId }}"
+                    {% endif -%}
+                }
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Coverage/{{ coverageId }}"
+            }
+        },
+        {% endif -%}
+        {% comment %} ============== Subscriber Patient (if dependent exists) ============== {% endcomment -%}
+        {% if isDependent and subscriberNM1 -%}
+            {% assign subscriberPatIdInput = subscriberNM1.Value | prepend: "Patient_Subscriber_278_" -%}
+            {% assign subscriberPatId = subscriberPatIdInput | generate_uuid -%}
+        {
+            "fullUrl": "urn:uuid:{{ subscriberPatId }}",
+            "resource": {
+                "resourceType": "Patient",
+                "id": "{{ subscriberPatId }}",
+                {% if subscriberNM1.Elements[9].Value != "" -%}
+                "identifier": [
+                    {
+                        {% if subscriberNM1.Elements[8].Value == "MI" -%}
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "MB",
+                                    "display": "Member Number"
+                                }
+                            ]
+                        },
+                        {% endif -%}
+                        "value": "{{ subscriberNM1.Elements[9].Value }}"
+                    }
+                ],
+                {% endif -%}
+                "name": [
+                    {
+                        "use": "official",
+                        "family": "{{ subscriberNM1.Elements[3].Value }}",
+                        "given": [
+                            "{{ subscriberNM1.Elements[4].Value }}"
+                        ]
+                    }
+                ]
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Patient/{{ subscriberPatId }}"
+            }
+        },
+        {% endif -%}
+        {% comment %} ============== Condition Resources (from HI segments) ============== {% endcomment -%}
+        {% for hiSeg in allHI -%}
+            {% comment %}
+              HI elements contain composite values with sub-elements.
+              HI01 sub-elements: qualifier:code (e.g., ABK:J06.9)
+              ABK = ICD-10 Principal Diagnosis, ABF = ICD-10 Diagnosis
+              BK = ICD-9 Principal Diagnosis, BF = ICD-9 Diagnosis
+            {% endcomment -%}
+            {% for elIdx in (1..12) -%}
+                {% assign hiEl = hiSeg.Elements[elIdx] -%}
+                {% if hiEl and hiEl.Value != "" -%}
+                    {% assign diagQualifier = hiEl.SubElements[1] -%}
+                    {% assign diagCode = hiEl.SubElements[2] -%}
+                    {% if diagCode != null and diagCode != "" -%}
+                        {% assign conditionIdInput = hiSeg.Value | append: "_" | append: elIdx | prepend: "Condition_278_" -%}
+                        {% assign conditionId = conditionIdInput | generate_uuid -%}
+        {
+            "fullUrl": "urn:uuid:{{ conditionId }}",
+            "resource": {
+                "resourceType": "Condition",
+                "id": "{{ conditionId }}",
+                "code": {
+                    "coding": [
+                        {
+                            {% if diagQualifier == "ABK" or diagQualifier == "ABF" or diagQualifier == "ABJ" or diagQualifier == "APR" -%}
+                            "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                            {% elsif diagQualifier == "BK" or diagQualifier == "BF" or diagQualifier == "BJ" -%}
+                            "system": "http://hl7.org/fhir/sid/icd-9-cm",
+                            {% else -%}
+                            "system": "http://hl7.org/fhir/sid/icd-10-cm",
+                            {% endif -%}
+                            "code": "{{ diagCode }}"
+                        }
+                    ]
+                },
+                {% if diagQualifier == "ABK" or diagQualifier == "BK" -%}
+                "category": [
+                    {
+                        "coding": [
+                            {
+                                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
+                                "code": "encounter-diagnosis",
+                                "display": "Encounter Diagnosis"
+                            }
+                        ],
+                        "text": "Principal Diagnosis"
+                    }
+                ],
+                {% endif -%}
+                "subject": {
+                    "reference": "Patient/{{ patientId }}"
+                }
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Condition/{{ conditionId }}"
+            }
+        },
+                    {% endif -%}
+                {% endif -%}
+            {% endfor -%}
+        {% endfor -%}
+        {% comment %} ============== ServiceRequest Resource ============== {% endcomment -%}
+        {% if sv1Segment or sv2Segment -%}
+        {
+            "fullUrl": "urn:uuid:{{ serviceRequestId }}",
+            "resource": {
+                "resourceType": "ServiceRequest",
+                "id": "{{ serviceRequestId }}",
+                "status": "active",
+                "intent": "order",
+                {% if sv1Segment -%}
+                    {% comment %}
+                      SV1: Professional service
+                      SV101 = Composite Medical Procedure (procedure code/type)
+                      SV102 = Monetary Amount
+                      SV103 = Unit or Basis for Measurement Code
+                      SV104 = Quantity
+                      SV107 = Composite Diagnosis Code Pointer
+                    {% endcomment -%}
+                    {% assign sv1ProcEl = sv1Segment.Elements[1] -%}
+                    {% if sv1ProcEl and sv1ProcEl.Value != "" -%}
+                "code": {
+                    "coding": [
+                        {
+                            {% assign procQualifier = sv1ProcEl.SubElements[1] -%}
+                            {% assign procCode = sv1ProcEl.SubElements[2] -%}
+                            {% if procQualifier == "HC" -%}
+                            "system": "http://www.ama-assn.org/go/cpt",
+                            {% elsif procQualifier == "HP" -%}
+                            "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                            {% elsif procQualifier == "IV" -%}
+                            "system": "http://www.ama-assn.org/go/cpt",
+                            {% else -%}
+                            "system": "http://www.ama-assn.org/go/cpt",
+                            {% endif -%}
+                            "code": "{{ procCode }}"
+                            {% if sv1ProcEl.SubElements[3] and sv1ProcEl.SubElements[3] != "" -%}
+                            ,"display": "{{ sv1ProcEl.SubElements[3] }}"
+                            {% endif -%}
+                        }
+                    ]
+                },
+                    {% endif -%}
+                    {% if sv1Segment.Elements[4].Value != "" -%}
+                "quantityQuantity": {
+                    "value": {{ sv1Segment.Elements[4].Value }},
+                    "unit": "{{ sv1Segment.Elements[3].Value }}"
+                },
+                    {% endif -%}
+                {% elsif sv2Segment -%}
+                    {% comment %}
+                      SV2: Institutional service
+                      SV201 = Revenue Code
+                      SV202 = Composite Medical Procedure
+                      SV203 = Monetary Amount
+                      SV204 = Unit or Basis for Measurement Code
+                      SV205 = Quantity
+                    {% endcomment -%}
+                    {% assign sv2ProcEl = sv2Segment.Elements[2] -%}
+                    {% if sv2ProcEl and sv2ProcEl.Value != "" -%}
+                "code": {
+                    "coding": [
+                        {
+                            {% assign procQualifier2 = sv2ProcEl.SubElements[1] -%}
+                            {% assign procCode2 = sv2ProcEl.SubElements[2] -%}
+                            {% if procQualifier2 == "HC" -%}
+                            "system": "http://www.ama-assn.org/go/cpt",
+                            {% else -%}
+                            "system": "http://www.ama-assn.org/go/cpt",
+                            {% endif -%}
+                            "code": "{{ procCode2 }}"
+                        }
+                    ]
+                },
+                    {% endif -%}
+                    {% if sv2Segment.Elements[5].Value != "" -%}
+                "quantityQuantity": {
+                    "value": {{ sv2Segment.Elements[5].Value }},
+                    "unit": "{{ sv2Segment.Elements[4].Value }}"
+                },
+                    {% endif -%}
+                {% endif -%}
+                "subject": {
+                    "reference": "Patient/{{ patientId }}"
+                }
+                {% if serviceProviderNM1 -%}
+                ,"performer": [
+                    {
+                        {% if serviceProviderNM1.Elements[2].Value == "1" -%}
+                        "reference": "Practitioner/{{ serviceProviderPractId }}"
+                        {% else -%}
+                        "reference": "Organization/{{ serviceProviderPractId }}"
+                        {% endif -%}
+                    }
+                ]
+                {% endif -%}
+                {% if serviceDateDTP -%}
+                    {% assign svcDateFmt = serviceDateDTP.Elements[2].Value -%}
+                    {% assign svcDateVal = serviceDateDTP.Elements[3].Value -%}
+                    {% if svcDateFmt == "D8" -%}
+                        {% assign svcYear = svcDateVal | slice: 0, 4 -%}
+                        {% assign svcMonth = svcDateVal | slice: 4, 2 -%}
+                        {% assign svcDay = svcDateVal | slice: 6, 2 -%}
+                ,"occurrenceDateTime": "{{ svcYear }}-{{ svcMonth }}-{{ svcDay }}"
+                    {% elsif svcDateFmt == "RD8" -%}
+                        {% assign svcStartDate = svcDateVal | slice: 0, 8 -%}
+                        {% assign svcEndDate = svcDateVal | slice: 9, 8 -%}
+                        {% assign svcSYear = svcStartDate | slice: 0, 4 -%}
+                        {% assign svcSMonth = svcStartDate | slice: 4, 2 -%}
+                        {% assign svcSDay = svcStartDate | slice: 6, 2 -%}
+                        {% assign svcEYear = svcEndDate | slice: 0, 4 -%}
+                        {% assign svcEMonth = svcEndDate | slice: 4, 2 -%}
+                        {% assign svcEDay = svcEndDate | slice: 6, 2 -%}
+                ,"occurrencePeriod": {
+                    "start": "{{ svcSYear }}-{{ svcSMonth }}-{{ svcSDay }}",
+                    "end": "{{ svcEYear }}-{{ svcEMonth }}-{{ svcEDay }}"
+                }
+                    {% endif -%}
+                {% endif -%}
+            },
+            "request": {
+                "method": "PUT",
+                "url": "ServiceRequest/{{ serviceRequestId }}"
+            }
+        },
+        {% endif -%}
+        {% comment %} ============== Claim Resource (preauthorization) ============== {% endcomment -%}
+        {
+            "fullUrl": "urn:uuid:{{ claimId }}",
+            "resource": {
+                "resourceType": "Claim",
+                "id": "{{ claimId }}",
+                "status": "active",
+                "use": "preauthorization",
+                "type": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+                            {% if sv2Segment or allCL1.size > 0 -%}
+                            "code": "institutional",
+                            "display": "Institutional"
+                            {% else -%}
+                            "code": "professional",
+                            "display": "Professional"
+                            {% endif -%}
+                        }
+                    ]
+                },
+                {% if headerSegments.BHT -%}
+                    {% if headerSegments.BHT.Elements[3].Value != "" -%}
+                "identifier": [
+                    {
+                        "system": "http://www.example.com/prior-auth",
+                        "value": "{{ headerSegments.BHT.Elements[3].Value }}"
+                    }
+                    {% if priorAuthRef -%}
+                    ,{
+                        "type": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                                    "code": "ACSN",
+                                    "display": "Prior Authorization Number"
+                                }
+                            ]
+                        },
+                        "value": "{{ priorAuthRef.Elements[2].Value }}"
+                    }
+                    {% endif -%}
+                ],
+                    {% endif -%}
+                {% endif -%}
+                "patient": {
+                    "reference": "Patient/{{ patientId }}"
+                },
+                {% if headerSegments.BHT -%}
+                    {% assign bhtDateVal = headerSegments.BHT.Elements[4].Value -%}
+                    {% if bhtDateVal != "" -%}
+                        {% assign bhtYear = bhtDateVal | slice: 0, 4 -%}
+                        {% assign bhtMonth = bhtDateVal | slice: 4, 2 -%}
+                        {% assign bhtDay = bhtDateVal | slice: 6, 2 -%}
+                "created": "{{ bhtYear }}-{{ bhtMonth }}-{{ bhtDay }}",
+                    {% endif -%}
+                {% endif -%}
+                {% if umoNM1 -%}
+                "insurer": {
+                    "reference": "Organization/{{ umoOrgId }}"
+                },
+                {% endif -%}
+                {% if requesterNM1 -%}
+                "provider": {
+                    {% if requesterNM1.Elements[2].Value == "1" -%}
+                    "reference": "Practitioner/{{ requesterPractId }}"
+                    {% else -%}
+                    "reference": "Organization/{{ requesterOrgId }}"
+                    {% endif -%}
+                },
+                {% endif -%}
+                "priority": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/processpriority",
+                            "code": "normal"
+                        }
+                    ]
+                },
+                {% if subscriberNM1 -%}
+                "insurance": [
+                    {
+                        "sequence": 1,
+                        "focal": true,
+                        "coverage": {
+                            "reference": "Coverage/{{ coverageId }}"
+                        }
+                    }
+                ],
+                {% endif -%}
+                {% comment %} Claim.supportingInfo from UM segment {% endcomment -%}
+                {% if umSegment -%}
+                "supportingInfo": [
+                    {
+                        "sequence": 1,
+                        "category": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/claiminformationcategory",
+                                    "code": "info"
+                                }
+                            ],
+                            "text": "Health Care Services Review Information"
+                        },
+                        "code": {
+                            "coding": [
+                                {
+                                    {% comment %}
+                                      UM01: Request Category
+                                      AR=Admission Review, HS=Health Services Review, SC=Specialty Care Review
+                                    {% endcomment -%}
+                                    "system": "https://x12.org/codes/request-category-code",
+                                    "code": "{{ umSegment.Elements[1].Value }}"
+                                    {% if umSegment.Elements[1].Value == "AR" -%}
+                                    ,"display": "Admission Review"
+                                    {% elsif umSegment.Elements[1].Value == "HS" -%}
+                                    ,"display": "Health Services Review"
+                                    {% elsif umSegment.Elements[1].Value == "SC" -%}
+                                    ,"display": "Specialty Care Review"
+                                    {% endif -%}
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "sequence": 2,
+                        "category": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/claiminformationcategory",
+                                    "code": "info"
+                                }
+                            ],
+                            "text": "Certification Type"
+                        },
+                        "code": {
+                            "coding": [
+                                {
+                                    {% comment %}
+                                      UM02: Certification Type
+                                      I=Initial, R=Renewal, E=Extension
+                                    {% endcomment -%}
+                                    "system": "https://x12.org/codes/certification-type-code",
+                                    "code": "{{ umSegment.Elements[2].Value }}"
+                                    {% if umSegment.Elements[2].Value == "I" -%}
+                                    ,"display": "Initial"
+                                    {% elsif umSegment.Elements[2].Value == "R" -%}
+                                    ,"display": "Renewal"
+                                    {% elsif umSegment.Elements[2].Value == "E" -%}
+                                    ,"display": "Extension"
+                                    {% endif -%}
+                                }
+                            ]
+                        }
+                    }
+                    {% if umSegment.Elements[3].Value != "" -%}
+                    ,{
+                        "sequence": 3,
+                        "category": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/claiminformationcategory",
+                                    "code": "info"
+                                }
+                            ],
+                            "text": "Service Type Code"
+                        },
+                        "code": {
+                            "coding": [
+                                {
+                                    "system": "https://x12.org/codes/service-type-code",
+                                    "code": "{{ umSegment.Elements[3].Value }}"
+                                }
+                            ]
+                        }
+                    }
+                    {% endif -%}
+                    {% if umSegment.Elements[4].Value != "" -%}
+                    ,{
+                        "sequence": 4,
+                        "category": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/claiminformationcategory",
+                                    "code": "hospitalized"
+                                }
+                            ],
+                            "text": "Health Care Service Location"
+                        },
+                        "code": {
+                            "coding": [
+                                {
+                                    {% comment %} UM04 is a composite: facility type:facility code:frequency {% endcomment -%}
+                                    "system": "https://www.cms.gov/Medicare/Coding/place-of-service-codes",
+                                    "code": "{{ umSegment.Elements[4].SubElements[1] }}"
+                                }
+                            ]
+                        }
+                    }
+                    {% endif -%}
+                    {% if umSegment.Elements[5].Value != "" -%}
+                    ,{
+                        "sequence": 5,
+                        "category": {
+                            "coding": [
+                                {
+                                    "system": "http://terminology.hl7.org/CodeSystem/claiminformationcategory",
+                                    "code": "info"
+                                }
+                            ],
+                            "text": "Related Causes"
+                        },
+                        "code": {
+                            "coding": [
+                                {
+                                    "system": "https://x12.org/codes/related-causes-code",
+                                    "code": "{{ umSegment.Elements[5].SubElements[1] }}"
+                                }
+                            ]
+                        }
+                    }
+                    {% endif -%}
+                ],
+                {% endif -%}
+                {% comment %} Claim.diagnosis from HI segments {% endcomment -%}
+                {% assign diagSequence = 0 -%}
+                {% assign hasDiag = false -%}
+                {% for hiSeg in allHI -%}
+                    {% for elIdx in (1..12) -%}
+                        {% assign hiElChk = hiSeg.Elements[elIdx] -%}
+                        {% if hiElChk and hiElChk.Value != "" -%}
+                            {% assign diagCodeChk = hiElChk.SubElements[2] -%}
+                            {% if diagCodeChk != null and diagCodeChk != "" -%}
+                                {% assign hasDiag = true -%}
+                            {% endif -%}
+                        {% endif -%}
+                    {% endfor -%}
+                {% endfor -%}
+                {% if hasDiag -%}
+                "diagnosis": [
+                    {% assign firstDiag = true -%}
+                    {% for hiSeg in allHI -%}
+                        {% for elIdx in (1..12) -%}
+                            {% assign hiEl2 = hiSeg.Elements[elIdx] -%}
+                            {% if hiEl2 and hiEl2.Value != "" -%}
+                                {% assign diagQualifier2 = hiEl2.SubElements[1] -%}
+                                {% assign diagCode2 = hiEl2.SubElements[2] -%}
+                                {% if diagCode2 != null and diagCode2 != "" -%}
+                                    {% assign diagSequence = diagSequence | plus: 1 -%}
+                                    {% assign condRefIdInput = hiSeg.Value | append: "_" | append: elIdx | prepend: "Condition_278_" -%}
+                                    {% assign condRefId = condRefIdInput | generate_uuid -%}
+                                    {% unless firstDiag -%}
+                                    ,
+                                    {% endunless -%}
+                    {
+                        "sequence": {{ diagSequence }},
+                        "diagnosisReference": {
+                            "reference": "Condition/{{ condRefId }}"
+                        },
+                        "type": [
+                            {
+                                "coding": [
+                                    {
+                                        "system": "http://terminology.hl7.org/CodeSystem/ex-diagnosistype",
+                                        {% if diagQualifier2 == "ABK" or diagQualifier2 == "BK" -%}
+                                        "code": "principal"
+                                        {% else -%}
+                                        "code": "admitting"
+                                        {% endif -%}
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                                    {% assign firstDiag = false -%}
+                                {% endif -%}
+                            {% endif -%}
+                        {% endfor -%}
+                    {% endfor -%}
+                ],
+                {% endif -%}
+                {% comment %} Claim.item from SV1/SV2 {% endcomment -%}
+                {% if sv1Segment or sv2Segment -%}
+                "item": [
+                    {
+                        "sequence": 1,
+                        {% if sv1Segment -%}
+                            {% assign sv1ProcElItem = sv1Segment.Elements[1] -%}
+                            {% if sv1ProcElItem and sv1ProcElItem.Value != "" -%}
+                                {% assign itemProcCode = sv1ProcElItem.SubElements[2] -%}
+                        "productOrService": {
+                            "coding": [
+                                {
+                                    {% assign itemProcQual = sv1ProcElItem.SubElements[1] -%}
+                                    {% if itemProcQual == "HC" -%}
+                                    "system": "http://www.ama-assn.org/go/cpt",
+                                    {% elsif itemProcQual == "HP" -%}
+                                    "system": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+                                    {% else -%}
+                                    "system": "http://www.ama-assn.org/go/cpt",
+                                    {% endif -%}
+                                    "code": "{{ itemProcCode }}"
+                                }
+                            ]
+                        },
+                            {% endif -%}
+                            {% if sv1Segment.Elements[4].Value != "" -%}
+                        "quantity": {
+                            "value": {{ sv1Segment.Elements[4].Value }}
+                        },
+                            {% endif -%}
+                            {% if sv1Segment.Elements[2].Value != "" -%}
+                        "unitPrice": {
+                            "value": {{ sv1Segment.Elements[2].Value }},
+                            "currency": "USD"
+                        },
+                            {% endif -%}
+                        {% elsif sv2Segment -%}
+                            {% if sv2Segment.Elements[1].Value != "" -%}
+                        "revenue": {
+                            "coding": [
+                                {
+                                    "system": "https://www.nubc.org/revenue-code",
+                                    "code": "{{ sv2Segment.Elements[1].Value }}"
+                                }
+                            ]
+                        },
+                            {% endif -%}
+                            {% assign sv2ProcElItem = sv2Segment.Elements[2] -%}
+                            {% if sv2ProcElItem and sv2ProcElItem.Value != "" -%}
+                                {% assign itemProcCode2 = sv2ProcElItem.SubElements[2] -%}
+                        "productOrService": {
+                            "coding": [
+                                {
+                                    "system": "http://www.ama-assn.org/go/cpt",
+                                    "code": "{{ itemProcCode2 }}"
+                                }
+                            ]
+                        },
+                            {% endif -%}
+                            {% if sv2Segment.Elements[5].Value != "" -%}
+                        "quantity": {
+                            "value": {{ sv2Segment.Elements[5].Value }}
+                        },
+                            {% endif -%}
+                            {% if sv2Segment.Elements[3].Value != "" -%}
+                        "unitPrice": {
+                            "value": {{ sv2Segment.Elements[3].Value }},
+                            "currency": "USD"
+                        },
+                            {% endif -%}
+                        {% endif -%}
+                        {% if serviceDateDTP -%}
+                            {% assign itemDateFmt = serviceDateDTP.Elements[2].Value -%}
+                            {% assign itemDateVal = serviceDateDTP.Elements[3].Value -%}
+                            {% if itemDateFmt == "D8" -%}
+                                {% assign itemYear = itemDateVal | slice: 0, 4 -%}
+                                {% assign itemMonth = itemDateVal | slice: 4, 2 -%}
+                                {% assign itemDay = itemDateVal | slice: 6, 2 -%}
+                        "servicedDate": "{{ itemYear }}-{{ itemMonth }}-{{ itemDay }}",
+                            {% elsif itemDateFmt == "RD8" -%}
+                                {% assign itemStartDate = itemDateVal | slice: 0, 8 -%}
+                                {% assign itemEndDate = itemDateVal | slice: 9, 8 -%}
+                                {% assign itemSYear = itemStartDate | slice: 0, 4 -%}
+                                {% assign itemSMonth = itemStartDate | slice: 4, 2 -%}
+                                {% assign itemSDay = itemStartDate | slice: 6, 2 -%}
+                                {% assign itemEYear = itemEndDate | slice: 0, 4 -%}
+                                {% assign itemEMonth = itemEndDate | slice: 4, 2 -%}
+                                {% assign itemEDay = itemEndDate | slice: 6, 2 -%}
+                        "servicedPeriod": {
+                            "start": "{{ itemSYear }}-{{ itemSMonth }}-{{ itemSDay }}",
+                            "end": "{{ itemEYear }}-{{ itemEMonth }}-{{ itemEDay }}"
+                        },
+                            {% endif -%}
+                        {% endif -%}
+                        {% comment %} Link item diagnosis references {% endcomment -%}
+                        {% if hasDiag -%}
+                        "diagnosisSequence": [
+                            {% assign firstDiagSeq = true -%}
+                            {% assign diagSeqCnt = 0 -%}
+                            {% for hiSeg in allHI -%}
+                                {% for elIdx in (1..12) -%}
+                                    {% assign hiEl3 = hiSeg.Elements[elIdx] -%}
+                                    {% if hiEl3 and hiEl3.Value != "" -%}
+                                        {% assign dc3 = hiEl3.SubElements[2] -%}
+                                        {% if dc3 != null and dc3 != "" -%}
+                                            {% assign diagSeqCnt = diagSeqCnt | plus: 1 -%}
+                                            {% unless firstDiagSeq -%}
+                                            ,
+                                            {% endunless -%}
+                                            {{ diagSeqCnt }}
+                                            {% assign firstDiagSeq = false -%}
+                                        {% endif -%}
+                                    {% endif -%}
+                                {% endfor -%}
+                            {% endfor -%}
+                        ],
+                        {% endif -%}
+                        "category": {
+                            "coding": [
+                                {
+                                    "system": "https://x12.org/codes/service-type-code",
+                                    {% if umSegment and umSegment.Elements[3].Value != "" -%}
+                                    "code": "{{ umSegment.Elements[3].Value }}"
+                                    {% else -%}
+                                    "code": "1"
+                                    {% endif -%}
+                                }
+                            ]
+                        }
+                    }
+                ],
+                {% endif -%}
+                {% comment %} Claim.referral link to ServiceRequest {% endcomment -%}
+                {% if sv1Segment or sv2Segment -%}
+                "referral": {
+                    "reference": "ServiceRequest/{{ serviceRequestId }}"
+                },
+                {% endif -%}
+                {% comment %} Claim.facility from UM04 service location {% endcomment -%}
+                {% if umSegment and umSegment.Elements[4].Value != "" -%}
+                "facility": {
+                    "identifier": {
+                        "value": "{{ umSegment.Elements[4].Value }}"
+                    }
+                },
+                {% endif -%}
+                {% comment %} Additional BHT info {% endcomment -%}
+                {% if headerSegments.BHT -%}
+                "extension": [
+                    {
+                        "url": "https://x12.org/fhir/StructureDefinition/bht-info",
+                        "extension": [
+                            {% if headerSegments.BHT.Elements[1].Value != "" -%}
+                            {
+                                "url": "hierarchicalStructureCode",
+                                "valueString": "{{ headerSegments.BHT.Elements[1].Value }}"
+                            },
+                            {% endif -%}
+                            {% if headerSegments.BHT.Elements[2].Value != "" -%}
+                            {
+                                "url": "transactionSetPurposeCode",
+                                "valueString": "{{ headerSegments.BHT.Elements[2].Value }}"
+                            },
+                            {% endif -%}
+                            {
+                                "url": "transactionType",
+                                "valueString": "278"
+                            }
+                        ]
+                    }
+                ]
+                {% endif -%}
+            },
+            "request": {
+                "method": "PUT",
+                "url": "Claim/{{ claimId }}"
+            }
+        }
+        {% comment %} ============== ClaimResponse Resource (if HCR present) ============== {% endcomment -%}
+        {% if hcrSegment -%}
+        ,{
+            "fullUrl": "urn:uuid:{{ claimResponseId }}",
+            "resource": {
+                "resourceType": "ClaimResponse",
+                "id": "{{ claimResponseId }}",
+                "status": "active",
+                "use": "preauthorization",
+                "type": {
+                    "coding": [
+                        {
+                            "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+                            {% if sv2Segment or allCL1.size > 0 -%}
+                            "code": "institutional",
+                            "display": "Institutional"
+                            {% else -%}
+                            "code": "professional",
+                            "display": "Professional"
+                            {% endif -%}
+                        }
+                    ]
+                },
+                "patient": {
+                    "reference": "Patient/{{ patientId }}"
+                },
+                {% if headerSegments.BHT -%}
+                    {% assign bhtDateVal2 = headerSegments.BHT.Elements[4].Value -%}
+                    {% if bhtDateVal2 != "" -%}
+                        {% assign bhtYear2 = bhtDateVal2 | slice: 0, 4 -%}
+                        {% assign bhtMonth2 = bhtDateVal2 | slice: 4, 2 -%}
+                        {% assign bhtDay2 = bhtDateVal2 | slice: 6, 2 -%}
+                "created": "{{ bhtYear2 }}-{{ bhtMonth2 }}-{{ bhtDay2 }}",
+                    {% endif -%}
+                {% endif -%}
+                {% if umoNM1 -%}
+                "insurer": {
+                    "reference": "Organization/{{ umoOrgId }}"
+                },
+                {% endif -%}
+                "request": {
+                    "reference": "Claim/{{ claimId }}"
+                },
+                {% comment %}
+                  HCR01: Action Code
+                    A1 = Certified in Total
+                    A2 = Certified - Partial
+                    A3 = Not Certified
+                    A4 = Pended
+                    A6 = Modified
+                    CT = Contact Payer
+                    NA = No Action Required
+                {% endcomment -%}
+                {% assign actionCode = hcrSegment.Elements[1].Value -%}
+                {% if actionCode == "A1" -%}
+                "outcome": "complete",
+                "disposition": "Certified in Total",
+                {% elsif actionCode == "A2" -%}
+                "outcome": "partial",
+                "disposition": "Certified - Partial",
+                {% elsif actionCode == "A3" -%}
+                "outcome": "error",
+                "disposition": "Not Certified",
+                {% elsif actionCode == "A4" -%}
+                "outcome": "queued",
+                "disposition": "Pended",
+                {% elsif actionCode == "A6" -%}
+                "outcome": "partial",
+                "disposition": "Modified",
+                {% elsif actionCode == "CT" -%}
+                "outcome": "queued",
+                "disposition": "Contact Payer",
+                {% elsif actionCode == "NA" -%}
+                "outcome": "complete",
+                "disposition": "No Action Required",
+                {% else -%}
+                "outcome": "queued",
+                "disposition": "{{ actionCode }}",
+                {% endif -%}
+                {% comment %} HCR02: Reference Identification (review/certification number) {% endcomment -%}
+                {% if hcrSegment.Elements[2].Value != "" -%}
+                "preAuthRef": "{{ hcrSegment.Elements[2].Value }}",
+                {% endif -%}
+                {% comment %} HCR03: Second/Third reasons if present {% endcomment -%}
+                "extension": [
+                    {
+                        "url": "https://x12.org/fhir/StructureDefinition/hcr-action-code",
+                        "valueString": "{{ actionCode }}"
+                    }
+                    {% if hcrSegment.Elements[3].Value != "" -%}
+                    ,{
+                        "url": "https://x12.org/fhir/StructureDefinition/hcr-reject-reason",
+                        "valueString": "{{ hcrSegment.Elements[3].Value }}"
+                    }
+                    {% endif -%}
+                ],
+                {% comment %} ClaimResponse items {% endcomment -%}
+                {% if sv1Segment or sv2Segment -%}
+                "item": [
+                    {
+                        "itemSequence": 1,
+                        "adjudication": [
+                            {
+                                "category": {
+                                    "coding": [
+                                        {
+                                            "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                                            "code": "submitted"
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                ],
+                {% endif -%}
+                {% if subscriberNM1 -%}
+                "insurance": [
+                    {
+                        "sequence": 1,
+                        "focal": true,
+                        "coverage": {
+                            "reference": "Coverage/{{ coverageId }}"
+                        }
+                    }
+                ],
+                {% endif -%}
+                {% comment %} Period from certification dates {% endcomment -%}
+                {% if certEffDateDTP or certExpDateDTP -%}
+                "preAuthPeriod": {
+                    {% if certEffDateDTP -%}
+                        {% assign cEffVal = certEffDateDTP.Elements[3].Value -%}
+                        {% assign cEffYear = cEffVal | slice: 0, 4 -%}
+                        {% assign cEffMonth = cEffVal | slice: 4, 2 -%}
+                        {% assign cEffDay = cEffVal | slice: 6, 2 -%}
+                    "start": "{{ cEffYear }}-{{ cEffMonth }}-{{ cEffDay }}"
+                    {% endif -%}
+                    {% if certExpDateDTP -%}
+                        {% assign cExpVal = certExpDateDTP.Elements[3].Value -%}
+                        {% assign cExpYear = cExpVal | slice: 0, 4 -%}
+                        {% assign cExpMonth = cExpVal | slice: 4, 2 -%}
+                        {% assign cExpDay = cExpVal | slice: 6, 2 -%}
+                        {% if certEffDateDTP -%}
+                    ,"end": "{{ cExpYear }}-{{ cExpMonth }}-{{ cExpDay }}"
+                        {% else -%}
+                    "end": "{{ cExpYear }}-{{ cExpMonth }}-{{ cExpDay }}"
+                        {% endif -%}
+                    {% endif -%}
+                }
+                {% endif -%}
+            },
+            "request": {
+                "method": "PUT",
+                "url": "ClaimResponse/{{ claimResponseId }}"
+            }
+        }
+        {% endif -%}
+    ]
+}

@@ -43,6 +43,12 @@ namespace Microsoft.Health.Fhir.Liquid.Converter.Processors
                 case (DataType.Fhir, ConvertDataOutputFormat.Hl7v2):
                     converter = new JsonToHl7v2Processor(processorSettings, _loggerFactory.CreateLogger<JsonToHl7v2Processor>());
                     break;
+                case (DataType.X12, ConvertDataOutputFormat.Fhir):
+                    converter = new X12Processor(processorSettings, _loggerFactory.CreateLogger<X12Processor>());
+                    break;
+                case (DataType.Fhir, ConvertDataOutputFormat.X12):
+                    converter = new FhirToX12Processor(processorSettings, _loggerFactory.CreateLogger<FhirToX12Processor>());
+                    break;
                 default:
                     throw new InvalidOperationException($"Input Data Type {inputDataType} and Output Format {outputFormat} pairing is not supported.");
             }

@@ -383,5 +383,14 @@ namespace Microsoft.Health.Fhir.Liquid.Converter {
                 return ResourceManager.GetString("ValidateTagSyntaxError", resourceCulture);
             }
         }
+
+        /// <summary>
+        ///   Looks up a localized string similar to The X12 EDI message is invalid: {0}..
+        /// </summary>
+        internal static string InvalidX12Message {
+            get {
+                return ResourceManager.GetString("InvalidX12Message", resourceCulture);
+            }
+        }
     }
 }
